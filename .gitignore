@@ -1,0 +1,14 @@
+/build/
+/cmake-build-*/
+*.o
+*.a
+*.d
+*.dSYM/
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.obj
+.DS_Store
+/shaders/*.spv
