@@ -1190,6 +1190,7 @@ int main(int, char**) {
     UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
     bool close_pending = false;
     bool close_request = false;
+    bool close_dialog_active = false;
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     double last_mouse_x = 0.0;
     double last_mouse_y = 0.0;
@@ -1425,40 +1426,44 @@ int main(int, char**) {
                 q_was_down = false;
             }
 
-            int left_state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
-            if (left_state == GLFW_PRESS && !selecting) {
-                selecting = true;
-                select_start = ImVec2((float)mouse_x, (float)mouse_y);
-                select_end = select_start;
-            } else if (left_state == GLFW_PRESS && selecting) {
-                select_end = ImVec2((float)mouse_x, (float)mouse_y);
-            } else if (left_state == GLFW_RELEASE && selecting) {
-                selecting = false;
-            }
-
-            if (selecting || left_state == GLFW_PRESS) {
-                float min_x = (select_start.x < select_end.x) ? select_start.x : select_end.x;
-                float max_x = (select_start.x > select_end.x) ? select_start.x : select_end.x;
-                float min_y = (select_start.y < select_end.y) ? select_start.y : select_end.y;
-                float max_y = (select_start.y > select_end.y) ? select_start.y : select_end.y;
-
-                int fb_width, fb_height;
-                int win_width, win_height;
-                glfwGetFramebufferSize(window, &fb_width, &fb_height);
-                glfwGetWindowSize(window, &win_width, &win_height);
-                float scale_x = (win_width > 0) ? (float)fb_width / (float)win_width : 1.0f;
-                float scale_y = (win_height > 0) ? (float)fb_height / (float)win_height : 1.0f;
-
-                uint32_t rect_x = (uint32_t)(min_x * scale_x);
-                uint32_t rect_y = (uint32_t)(min_y * scale_y);
-                uint32_t rect_w = (uint32_t)((max_x - min_x) * scale_x);
-                uint32_t rect_h = (uint32_t)((max_y - min_y) * scale_y);
-                if (rect_w == 0) rect_w = 1;
-                if (rect_h == 0) rect_h = 1;
-
-                if (g_VoxelRenderer.pickRect(rect_x, rect_y, rect_w, rect_h, &selected_flags)) {
-                    g_VoxelRenderer.setSelection(selected_flags);
+            if (!close_dialog_active) {
+                int left_state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
+                if (left_state == GLFW_PRESS && !selecting) {
+                    selecting = true;
+                    select_start = ImVec2((float)mouse_x, (float)mouse_y);
+                    select_end = select_start;
+                } else if (left_state == GLFW_PRESS && selecting) {
+                    select_end = ImVec2((float)mouse_x, (float)mouse_y);
+                } else if (left_state == GLFW_RELEASE && selecting) {
+                    selecting = false;
                 }
+
+                if (selecting || left_state == GLFW_PRESS) {
+                    float min_x = (select_start.x < select_end.x) ? select_start.x : select_end.x;
+                    float max_x = (select_start.x > select_end.x) ? select_start.x : select_end.x;
+                    float min_y = (select_start.y < select_end.y) ? select_start.y : select_end.y;
+                    float max_y = (select_start.y > select_end.y) ? select_start.y : select_end.y;
+
+                    int fb_width, fb_height;
+                    int win_width, win_height;
+                    glfwGetFramebufferSize(window, &fb_width, &fb_height);
+                    glfwGetWindowSize(window, &win_width, &win_height);
+                    float scale_x = (win_width > 0) ? (float)fb_width / (float)win_width : 1.0f;
+                    float scale_y = (win_height > 0) ? (float)fb_height / (float)win_height : 1.0f;
+
+                    uint32_t rect_x = (uint32_t)(min_x * scale_x);
+                    uint32_t rect_y = (uint32_t)(min_y * scale_y);
+                    uint32_t rect_w = (uint32_t)((max_x - min_x) * scale_x);
+                    uint32_t rect_h = (uint32_t)((max_y - min_y) * scale_y);
+                    if (rect_w == 0) rect_w = 1;
+                    if (rect_h == 0) rect_h = 1;
+
+                    if (g_VoxelRenderer.pickRect(rect_x, rect_y, rect_w, rect_h, &selected_flags)) {
+                        g_VoxelRenderer.setSelection(selected_flags);
+                    }
+                }
+            } else if (selecting) {
+                selecting = false;
             }
         }
 
@@ -1523,7 +1528,7 @@ int main(int, char**) {
                 hover_block_index = -1;
             }
 
-            if (left_state == GLFW_PRESS && !left_was_down && hover_has_block && hover_block_index >= 0 &&
+            if (!close_dialog_active && left_state == GLFW_PRESS && !left_was_down && hover_has_block && hover_block_index >= 0 &&
                 hover_block_index < (int)dungeon_blocks.size()) {
                 dungeon_blocks.erase(dungeon_blocks.begin() + hover_block_index);
                 selected_flags.assign(dungeon_blocks.size(), 0);
@@ -1535,7 +1540,7 @@ int main(int, char**) {
                 UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
             }
 
-            if (ghost_enabled) {
+            if (!close_dialog_active && ghost_enabled) {
                 if (right_state == GLFW_PRESS) {
                     if (!painting) {
                         painting = true;
@@ -1623,7 +1628,7 @@ int main(int, char**) {
                     paint_dir_valid = false;
                     ghost_hover_last = false;
                 }
-            } else if (right_state == GLFW_PRESS && !right_was_down && has_best) {
+            } else if (!close_dialog_active && right_state == GLFW_PRESS && !right_was_down && has_best) {
                 float place_x = hover_place_x;
                 float place_y = hover_place_y;
                 float place_z = hover_place_z;
@@ -1676,10 +1681,12 @@ int main(int, char**) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        bool ui_capture_mouse = ImGui::GetIO().WantCaptureMouse;
 
         if (close_pending) {
             ImGui::OpenPopup("Unsaved Changes");
             close_pending = false;
+            close_dialog_active = true;
         }
         bool close_popup_open = true;
         if (ImGui::BeginPopupModal("Unsaved Changes", &close_popup_open, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -1693,21 +1700,27 @@ int main(int, char**) {
                     UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
                     close_request = true;
                 }
+                close_dialog_active = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
             if (ImGui::Button("Ignore")) {
                 close_request = true;
+                close_dialog_active = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) {
+                close_dialog_active = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
         }
+        close_dialog_active = ImGui::IsPopupOpen("Unsaved Changes");
+        if (close_dialog_active)
+            ui_capture_mouse = true;
 
-        if (edit_mode && selecting) {
+        if (edit_mode && selecting && !ui_capture_mouse) {
             ImDrawList* draw_list = ImGui::GetForegroundDrawList();
             ImU32 color = IM_COL32(255, 255, 0, 255);
             draw_list->AddRect(select_start, select_end, color, 0.0f, 0, 2.0f);
