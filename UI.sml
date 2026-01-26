@@ -4,12 +4,34 @@ Window {
     size: 1280,720
 
     state {
-        persist: user      // user | project | session
+        persist: user
         pos: true
         size: true
         maximized: true
         lastFilePath: true
         docking: true
+        theme: "dark"
+    }
+
+    MainMenu {
+        Menu {
+            label: "File"
+
+            MenuItem {
+                label: "Open"
+            }
+            Separator {}
+            MenuItem {
+                label: "Save"
+            }
+            MenuItem {
+                label: "Save As"
+            }
+            Separator {}
+            MenuItem {
+                label: "Exit"
+            }
+        }
     }
 
     ToolBar { 

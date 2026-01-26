@@ -270,6 +270,84 @@ static std::string GetStatePath(const std::string& persist) {
     return "RaidBuilder/state_user.cfg";
 }
 
+static bool ParseHexColor(const std::string& text, ImVec4* out) {
+    if (!out)
+        return false;
+    std::string s = text;
+    if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0)
+        s = s.substr(2);
+    if (!s.empty() && s[0] == '#')
+        s = s.substr(1);
+    if (s.size() != 6 && s.size() != 8)
+        return false;
+    unsigned int value = 0;
+    std::stringstream ss;
+    ss << std::hex << s;
+    ss >> value;
+    unsigned int a = 0xFF;
+    unsigned int r = 0, g = 0, b = 0;
+    if (s.size() == 8) {
+        a = (value >> 24) & 0xFF;
+        r = (value >> 16) & 0xFF;
+        g = (value >> 8) & 0xFF;
+        b = value & 0xFF;
+    } else {
+        r = (value >> 16) & 0xFF;
+        g = (value >> 8) & 0xFF;
+        b = value & 0xFF;
+    }
+    out->x = (float)r / 255.0f;
+    out->y = (float)g / 255.0f;
+    out->z = (float)b / 255.0f;
+    out->w = (float)a / 255.0f;
+    return true;
+}
+
+static bool LoadThemeFile(const std::string& path, smlui::UiTheme* out_theme) {
+    if (!out_theme)
+        return false;
+    std::string text;
+    if (!LoadFileText(path.c_str(), &text))
+        return false;
+    class ThemeHandler : public sml::SmlHandler {
+    public:
+        smlui::UiTheme* theme;
+        std::vector<std::string> stack;
+        explicit ThemeHandler(smlui::UiTheme* t) : theme(t) {}
+        void startElement(const std::string& name) override { stack.push_back(name); }
+        void onProperty(const std::string& name, const sml::PropertyValue& value) override {
+            if (stack.empty() || stack.back() != "Theme" || value.type != sml::PropertyValue::String)
+                return;
+            ImVec4 color;
+            if (!ParseHexColor(value.string_value, &color))
+                return;
+            if (name == "toolbarBg") theme->toolbar_bg = color;
+            else if (name == "statusBg") theme->status_bg = color;
+            else if (name == "statusText") theme->status_text = color;
+            else if (name == "leftBg") theme->left_bg = color;
+            else if (name == "rightBg") theme->right_bg = color;
+            else if (name == "centerBg") theme->center_bg = color;
+        }
+        void endElement(const std::string& name) override { (void)name; if (!stack.empty()) stack.pop_back(); }
+    };
+    ThemeHandler handler(out_theme);
+    try {
+        sml::SmlSaxParser parser(text);
+        parser.parse(handler);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+static std::string ResolveThemePath(const std::string& theme_name) {
+    if (theme_name.empty())
+        return "";
+    if (theme_name.find('/') != std::string::npos || theme_name.find('\\') != std::string::npos)
+        return theme_name;
+    return std::string("RaidBuilder/themes/") + theme_name + ".sml";
+}
+
 static bool LoadAppState(const std::string& path, AppState* out_state) {
     std::ifstream file(path.c_str());
     if (!file.is_open())
@@ -811,6 +889,12 @@ int main(int, char**) {
 
     float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
     smlui::UiWindow ui_window = ui_document.window();
+    if (!ui_window.state.theme.empty()) {
+        smlui::UiTheme theme;
+        std::string theme_path = ResolveThemePath(ui_window.state.theme);
+        if (LoadThemeFile(theme_path, &theme))
+            ui_document.setTheme(theme);
+    }
     AppState saved_state;
     std::string state_path = GetStatePath(ui_window.state.persist);
     LoadAppState(state_path, &saved_state);
