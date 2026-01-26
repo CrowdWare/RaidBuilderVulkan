@@ -12,23 +12,16 @@ Window {
         docking: true
     }
 
+    ToolBar { 
+        height: 48
+        ToolButton { icon: play }
+    }
+    
+    StatusBar { 
+        height: 24
+    }
+    
     DockLayout {
-
-        Top {
-            height: 48
-            Column {
-                //MenuBar { }
-                ToolBar { 
-                    ToolButton { icon: play }
-                }
-            }
-        }
-
-        Bottom {
-            height: 24
-            StatusBar { }
-        }
-
         Left {
             label: "Toolbar"
             width: 56

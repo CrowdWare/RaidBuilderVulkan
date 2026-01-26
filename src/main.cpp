@@ -829,8 +829,10 @@ int main(int, char**) {
     bool e_was_down = false;
     bool q_was_down = false;
     bool g_was_down = false;
+    bool esc_was_down = false;
     bool right_was_down = false;
     bool painting = false;
+    bool ghost_hover_last = false;
     int paint_count = 0;
     bool paint_last_valid = false;
     float paint_last_x = 0.0f;
@@ -868,7 +870,7 @@ int main(int, char**) {
         float dt = (float)(now_time - last_time);
         last_time = now_time;
 
-        if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) {
+        if (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS) {
             if (!f_was_down) {
                 edit_mode = !edit_mode;
                 glfwSetInputMode(window, GLFW_CURSOR, edit_mode ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
@@ -878,6 +880,8 @@ int main(int, char**) {
                 hover_has_block = false;
                 hover_has_ground = false;
                 hover_block_index = -1;
+                painting = false;
+                ghost_hover_last = false;
                 if (!edit_mode) {
                     std::fill(selected_flags.begin(), selected_flags.end(), 0);
                     g_VoxelRenderer.setSelection(selected_flags);
@@ -886,6 +890,29 @@ int main(int, char**) {
             f_was_down = true;
         } else {
             f_was_down = false;
+        }
+        if (!edit_mode) {
+            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+                if (!esc_was_down) {
+                    edit_mode = true;
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                    first_mouse = true;
+                    selecting = false;
+                    right_was_down = false;
+                    hover_has_block = false;
+                    hover_has_ground = false;
+                    hover_block_index = -1;
+                    painting = false;
+                    ghost_hover_last = false;
+                    std::fill(selected_flags.begin(), selected_flags.end(), 0);
+                    g_VoxelRenderer.setSelection(selected_flags);
+                }
+                esc_was_down = true;
+            } else {
+                esc_was_down = false;
+            }
+        } else {
+            esc_was_down = false;
         }
         if (!edit_mode) {
             if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) {
@@ -1085,82 +1112,82 @@ int main(int, char**) {
                         paint_count = 0;
                         paint_last_valid = false;
                         paint_dir_valid = false;
-                    }
-                    if (has_best && paint_count < max_paint_blocks) {
-                        float place_x = hover_place_x;
-                        float place_y = hover_place_y;
-                        float place_z = hover_place_z;
-                        float dir_x = paint_dir_valid ? paint_dir_x : hover_face_nx;
-                        float dir_y = paint_dir_valid ? paint_dir_y : hover_face_ny;
-                        float dir_z = paint_dir_valid ? paint_dir_z : hover_face_nz;
-                        if (paint_dir_valid) {
-                            ComputeAxisPlacement(true,
-                                                 paint_dir_x, paint_dir_y, paint_dir_z,
-                                                 paint_anchor_x, paint_anchor_y, paint_anchor_z,
-                                                 block_size,
-                                                 place_x, place_y, place_z,
-                                                 &place_x, &place_y, &place_z);
-                        }
-                        float dx = place_x - camera_x;
-                        float dy = place_y - camera_y;
-                        float dz = place_z - camera_z;
-                        float dist2 = dx * dx + dy * dy + dz * dz;
-                        if (dist2 <= max_place_distance * max_place_distance) {
-                            bool dir_ok = true;
-                            if (paint_dir_valid) {
-                                float rx = place_x - paint_anchor_x;
-                                float ry = place_y - paint_anchor_y;
-                                float rz = place_z - paint_anchor_z;
-                                float dot = rx * paint_dir_x + ry * paint_dir_y + rz * paint_dir_z;
-                                float off_x = rx - paint_dir_x * dot;
-                                float off_y = ry - paint_dir_y * dot;
-                                float off_z = rz - paint_dir_z * dot;
-                                float off_len2 = off_x * off_x + off_y * off_y + off_z * off_z;
-                                dir_ok = (dot >= -0.001f) && (off_len2 <= 0.0001f);
-                            }
-                            float free_x = place_x;
-                            float free_y = place_y;
-                            float free_z = place_z;
-                            bool free_ok = FindNextFreePlacement(dungeon_blocks,
-                                                                 place_x, place_y, place_z,
-                                                                 dir_x, dir_y, dir_z,
-                                                                 block_size, max_paint_blocks,
-                                                                 &free_x, &free_y, &free_z);
-                            bool same_as_last = paint_last_valid &&
-                                                std::fabs(free_x - paint_last_x) < 0.001f &&
-                                                std::fabs(free_y - paint_last_y) < 0.001f &&
-                                                std::fabs(free_z - paint_last_z) < 0.001f;
-                            if (free_ok && dir_ok && !same_as_last) {
+                        ghost_hover_last = false;
+                        if (has_best) {
+                            float place_x = hover_place_x;
+                            float place_y = hover_place_y;
+                            float place_z = hover_place_z;
+                            float dir_x = hover_face_nx;
+                            float dir_y = hover_face_ny;
+                            float dir_z = hover_face_nz;
+                            float dx = place_x - camera_x;
+                            float dy = place_y - camera_y;
+                            float dz = place_z - camera_z;
+                            float dist2 = dx * dx + dy * dy + dz * dz;
+                            if (dist2 <= max_place_distance * max_place_distance &&
+                                FindBlockAt(dungeon_blocks, place_x, place_y, place_z, 0.001f) < 0) {
                                 voxel::VoxelRenderer::Block new_block = {place_x, place_y, place_z};
-                                new_block.x = free_x;
-                                new_block.y = free_y;
-                                new_block.z = free_z;
                                 dungeon_blocks.push_back(new_block);
                                 selected_flags.assign(dungeon_blocks.size(), 0);
                                 selected_flags.back() = 1;
                                 g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
                                 g_VoxelRenderer.setSelection(selected_flags);
-                                paint_last_x = free_x;
-                                paint_last_y = free_y;
-                                paint_last_z = free_z;
+                                paint_last_x = place_x;
+                                paint_last_y = place_y;
+                                paint_last_z = place_z;
                                 paint_last_valid = true;
-                                if (!paint_dir_valid) {
-                                    paint_dir_x = dir_x;
-                                    paint_dir_y = dir_y;
-                                    paint_dir_z = dir_z;
-                                    paint_anchor_x = free_x;
-                                    paint_anchor_y = free_y;
-                                    paint_anchor_z = free_z;
-                                    paint_dir_valid = true;
-                                }
-                                paint_count++;
+                                paint_dir_x = dir_x;
+                                paint_dir_y = dir_y;
+                                paint_dir_z = dir_z;
+                                paint_anchor_x = place_x;
+                                paint_anchor_y = place_y;
+                                paint_anchor_z = place_z;
+                                paint_dir_valid = true;
+                                paint_count = 1;
                             }
                         }
+                    } else if (paint_dir_valid && paint_count < max_paint_blocks) {
+                        float free_x = paint_last_x + paint_dir_x * block_size;
+                        float free_y = paint_last_y + paint_dir_y * block_size;
+                        float free_z = paint_last_z + paint_dir_z * block_size;
+                        bool free_ok = (FindBlockAt(dungeon_blocks, free_x, free_y, free_z, 0.001f) < 0);
+                        bool ghost_hit = false;
+                        if (free_ok) {
+                            float half = block_size * 0.5f;
+                            float bmin[3] = {free_x - half, free_y - half, free_z - half};
+                            float bmax[3] = {free_x + half, free_y + half, free_z + half};
+                            float t = 0.0f;
+                            float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+                            if (RayAabb(ray_origin, ray_dir, bmin, bmax, &t, &nx, &ny, &nz)) {
+                                float nearest_scene = 1e30f;
+                                if (has_block)
+                                    nearest_scene = block_hit.t;
+                                if (has_ground && ground_hit.t < nearest_scene)
+                                    nearest_scene = ground_hit.t;
+                                if (t <= nearest_scene + 0.001f)
+                                    ghost_hit = true;
+                            }
+                        }
+                        if (ghost_hit && !ghost_hover_last) {
+                            voxel::VoxelRenderer::Block new_block = {free_x, free_y, free_z};
+                            dungeon_blocks.push_back(new_block);
+                            selected_flags.assign(dungeon_blocks.size(), 0);
+                            selected_flags.back() = 1;
+                            g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
+                            g_VoxelRenderer.setSelection(selected_flags);
+                            paint_last_x = free_x;
+                            paint_last_y = free_y;
+                            paint_last_z = free_z;
+                            paint_last_valid = true;
+                            paint_count++;
+                        }
+                        ghost_hover_last = ghost_hit;
                     }
                 } else {
                     painting = false;
                     paint_last_valid = false;
                     paint_dir_valid = false;
+                    ghost_hover_last = false;
                 }
             } else if (right_state == GLFW_PRESS && !right_was_down && has_best) {
                 float place_x = hover_place_x;
@@ -1309,25 +1336,25 @@ int main(int, char**) {
                 float ghost_x = hover_place_x;
                 float ghost_y = hover_place_y;
                 float ghost_z = hover_place_z;
-                if (paint_dir_valid) {
-                    ComputeAxisPlacement(true,
-                                         paint_dir_x, paint_dir_y, paint_dir_z,
-                                         paint_anchor_x, paint_anchor_y, paint_anchor_z,
-                                         block_size,
-                                         ghost_x, ghost_y, ghost_z,
-                                         &ghost_x, &ghost_y, &ghost_z);
-                }
                 float dir_x = paint_dir_valid ? paint_dir_x : hover_face_nx;
                 float dir_y = paint_dir_valid ? paint_dir_y : hover_face_ny;
                 float dir_z = paint_dir_valid ? paint_dir_z : hover_face_nz;
                 float free_x = ghost_x;
                 float free_y = ghost_y;
                 float free_z = ghost_z;
-                bool free_ok = FindNextFreePlacement(dungeon_blocks,
-                                                     ghost_x, ghost_y, ghost_z,
-                                                     dir_x, dir_y, dir_z,
-                                                     block_size, max_paint_blocks,
-                                                     &free_x, &free_y, &free_z);
+                bool free_ok = true;
+                if (paint_dir_valid) {
+                    free_x = paint_last_x + paint_dir_x * block_size;
+                    free_y = paint_last_y + paint_dir_y * block_size;
+                    free_z = paint_last_z + paint_dir_z * block_size;
+                    free_ok = (FindBlockAt(dungeon_blocks, free_x, free_y, free_z, 0.001f) < 0);
+                } else {
+                    free_ok = FindNextFreePlacement(dungeon_blocks,
+                                                    ghost_x, ghost_y, ghost_z,
+                                                    dir_x, dir_y, dir_z,
+                                                    block_size, max_paint_blocks,
+                                                    &free_x, &free_y, &free_z);
+                }
                 float center_x = free_x;
                 float center_y = free_y;
                 float center_z = free_z;
