@@ -251,6 +251,66 @@ static bool LoadFileText(const char* path, std::string* out_text) {
     return true;
 }
 
+struct AppState {
+    bool has_pos = false;
+    bool has_size = false;
+    bool maximized = false;
+    int pos_x = 0;
+    int pos_y = 0;
+    int size_x = 0;
+    int size_y = 0;
+    std::string last_file_path;
+};
+
+static std::string GetStatePath(const std::string& persist) {
+    if (persist == "project")
+        return "RaidBuilder/state_project.cfg";
+    if (persist == "session")
+        return "/tmp/raidbuilder_state.cfg";
+    return "RaidBuilder/state_user.cfg";
+}
+
+static bool LoadAppState(const std::string& path, AppState* out_state) {
+    std::ifstream file(path.c_str());
+    if (!file.is_open())
+        return false;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty())
+            continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        if (key == "pos") {
+            std::sscanf(value.c_str(), "%d,%d", &out_state->pos_x, &out_state->pos_y);
+            out_state->has_pos = true;
+        } else if (key == "size") {
+            std::sscanf(value.c_str(), "%d,%d", &out_state->size_x, &out_state->size_y);
+            out_state->has_size = true;
+        } else if (key == "maximized") {
+            out_state->maximized = (value == "1");
+        } else if (key == "lastFilePath") {
+            out_state->last_file_path = value;
+        }
+    }
+    return true;
+}
+
+static void SaveAppState(const std::string& path, const AppState& state) {
+    std::ofstream file(path.c_str(), std::ios::trunc);
+    if (!file.is_open())
+        return;
+    if (state.has_pos)
+        file << "pos=" << state.pos_x << "," << state.pos_y << "\n";
+    if (state.has_size)
+        file << "size=" << state.size_x << "," << state.size_y << "\n";
+    file << "maximized=" << (state.maximized ? "1" : "0") << "\n";
+    if (!state.last_file_path.empty())
+        file << "lastFilePath=" << state.last_file_path << "\n";
+}
+
 static std::string ResolveAssetPath(const std::string& path, const char* prefix) {
     if (path.empty())
         return path;
@@ -750,7 +810,18 @@ int main(int, char**) {
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
-    const smlui::UiWindow& ui_window = ui_document.window();
+    smlui::UiWindow ui_window = ui_document.window();
+    AppState saved_state;
+    std::string state_path = GetStatePath(ui_window.state.persist);
+    LoadAppState(state_path, &saved_state);
+    if (ui_window.state.pos && saved_state.has_pos) {
+        ui_window.position.x = saved_state.pos_x;
+        ui_window.position.y = saved_state.pos_y;
+    }
+    if (ui_window.state.size && saved_state.has_size) {
+        ui_window.size.x = saved_state.size_x;
+        ui_window.size.y = saved_state.size_y;
+    }
     const char* window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title.c_str();
     GLFWwindow* window = glfwCreateWindow((int)(ui_window.size.x * main_scale), (int)(ui_window.size.y * main_scale), window_title, nullptr, nullptr);
     if (!glfwVulkanSupported()) {
@@ -829,6 +900,8 @@ int main(int, char**) {
     io.FontDefault = font_13;
 
     glfwSetWindowPos(window, (int)(ui_window.position.x * main_scale), (int)(ui_window.position.y * main_scale));
+    if (ui_window.state.maximized && saved_state.maximized)
+        glfwMaximizeWindow(window);
     glfwSetCursorPos(window, (ui_window.size.x * main_scale) * 0.5, (ui_window.size.y * main_scale) * 0.5);
 
     bool edit_mode = true;
@@ -1449,6 +1522,22 @@ int main(int, char**) {
             FrameRender(wd, main_draw_data);
         FramePresent(wd);
     }
+
+    AppState out_state;
+    if (ui_window.state.pos) {
+        glfwGetWindowPos(window, &out_state.pos_x, &out_state.pos_y);
+        out_state.has_pos = true;
+    }
+    if (ui_window.state.size) {
+        glfwGetWindowSize(window, &out_state.size_x, &out_state.size_y);
+        out_state.has_size = true;
+    }
+    if (ui_window.state.maximized) {
+        out_state.maximized = (glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0);
+    }
+    if (ui_window.state.last_file_path)
+        out_state.last_file_path = dungeon_path;
+    SaveAppState(state_path, out_state);
 
     vkDeviceWaitIdle(g_Device);
     g_VoxelRenderer.shutdown();
