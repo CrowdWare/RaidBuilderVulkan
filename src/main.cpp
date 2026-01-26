@@ -34,6 +34,12 @@
 #include <cmath>
 #include <map>
 #include <algorithm>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <cerrno>
+#if defined(_WIN32)
+#include <direct.h>
+#endif
 
 #define PI_F 3.1415926f
 
@@ -215,6 +221,10 @@ static bool FindNextFreePlacement(const std::vector<voxel::VoxelRenderer::Block>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#if defined(__APPLE__)
+#include "mac_menu.h"
+#endif
+
 static VkAllocationCallbacks* g_Allocator = nullptr;
 static VkInstance g_Instance = VK_NULL_HANDLE;
 static VkPhysicalDevice g_PhysicalDevice = VK_NULL_HANDLE;
@@ -248,6 +258,73 @@ static bool LoadFileText(const char* path, std::string* out_text) {
     std::ostringstream ss;
     ss << file.rdbuf();
     *out_text = ss.str();
+    return true;
+}
+
+static bool FileExists(const std::string& path) {
+    std::ifstream file(path.c_str());
+    return file.good();
+}
+
+static bool EnsureDir(const std::string& path) {
+#if defined(_WIN32)
+    if (_mkdir(path.c_str()) == 0)
+        return true;
+    return errno == EEXIST;
+#else
+    if (mkdir(path.c_str(), 0755) == 0)
+        return true;
+    return errno == EEXIST;
+#endif
+}
+
+static std::string GetUserHomeDir() {
+#if defined(_WIN32)
+    const char* home = std::getenv("USERPROFILE");
+#else
+    const char* home = std::getenv("HOME");
+#endif
+    if (!home)
+        return ".";
+    return std::string(home);
+}
+
+static std::string GetHistoryDir() {
+#if defined(__APPLE__)
+    return GetUserHomeDir() + "/Library/Application Support/RaidBuilder/history";
+#elif defined(_WIN32)
+    return GetUserHomeDir() + "/AppData/Roaming/RaidBuilder/history";
+#else
+    return GetUserHomeDir() + "/.local/share/raidbuilder/history";
+#endif
+}
+
+static std::string GetFileBaseName(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos)
+        name = name.substr(0, dot);
+    return name;
+}
+
+static std::string NextHistoryPath(const std::string& history_dir, const std::string& base_name) {
+    for (int i = 1; i < 100000; ++i) {
+        std::string candidate = history_dir + "/" + base_name + std::to_string(i) + ".sml";
+        if (!FileExists(candidate))
+            return candidate;
+    }
+    return history_dir + "/" + base_name + ".sml";
+}
+
+static bool CopyFile(const std::string& src, const std::string& dst) {
+    std::ifstream in(src.c_str(), std::ios::binary);
+    if (!in.is_open())
+        return false;
+    std::ofstream out(dst.c_str(), std::ios::binary);
+    if (!out.is_open())
+        return false;
+    out << in.rdbuf();
     return true;
 }
 
@@ -389,6 +466,96 @@ static void SaveAppState(const std::string& path, const AppState& state) {
         file << "lastFilePath=" << state.last_file_path << "\n";
 }
 
+static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                                   float block_size,
+                                   const std::string& tile_model_path) {
+    if (blocks.empty())
+        return "Dungeon {\n}\n";
+
+    struct Bounds {
+        bool has = false;
+        int min_x = 0;
+        int max_x = 0;
+        int min_z = 0;
+        int max_z = 0;
+    };
+
+    std::map<int, std::map<std::pair<int, int>, char> > layers;
+    std::map<int, Bounds> bounds;
+
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        int gx = (int)std::round(blocks[i].x / block_size);
+        int gz = (int)std::round(blocks[i].z / block_size);
+        int layer = (int)std::round(blocks[i].y / block_size - 0.5f);
+        layers[layer][std::make_pair(gx, gz)] = 's';
+        Bounds& b = bounds[layer];
+        if (!b.has) {
+            b.has = true;
+            b.min_x = b.max_x = gx;
+            b.min_z = b.max_z = gz;
+        } else {
+            b.min_x = std::min(b.min_x, gx);
+            b.max_x = std::max(b.max_x, gx);
+            b.min_z = std::min(b.min_z, gz);
+            b.max_z = std::max(b.max_z, gz);
+        }
+    }
+
+    std::ostringstream out;
+    out << "Dungeon {\n";
+    out << "    TileMap {\n";
+    out << "        lines: \"\n";
+    for (std::map<int, std::map<std::pair<int, int>, char> >::const_iterator it = layers.begin(); it != layers.end(); ++it) {
+        int layer = it->first;
+        Bounds b = bounds[layer];
+        out << "#" << layer << "\n";
+        for (int z = b.min_z; z <= b.max_z; ++z) {
+            for (int x = b.min_x; x <= b.max_x; ++x) {
+                std::map<std::pair<int, int>, char>::const_iterator cell = it->second.find(std::make_pair(x, z));
+                char value = (cell != it->second.end()) ? cell->second : '.';
+                out << value;
+                if (x < b.max_x)
+                    out << " ";
+            }
+            out << "\n";
+        }
+    }
+    out << "        \"\n";
+    out << "    }\n\n";
+    if (!tile_model_path.empty()) {
+        out << "    Tiles {\n";
+        out << "        Tile { key: \"s\" model: \"" << tile_model_path << "\" }\n";
+        out << "    }\n\n";
+    }
+    out << "}\n";
+    return out.str();
+}
+
+static bool SaveDungeonWithHistory(const std::string& path,
+                                   const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                                   float block_size,
+                                   const std::string& tile_model_path) {
+    if (path.empty())
+        return false;
+    if (FileExists(path)) {
+        std::string history_dir = GetHistoryDir();
+        if (EnsureDir(history_dir)) {
+            std::string base_name = GetFileBaseName(path);
+            std::string history_path = NextHistoryPath(history_dir, base_name);
+            if (std::rename(path.c_str(), history_path.c_str()) != 0) {
+                if (CopyFile(path, history_path))
+                    std::remove(path.c_str());
+            }
+        }
+    }
+
+    std::ofstream out(path.c_str(), std::ios::trunc);
+    if (!out.is_open())
+        return false;
+    out << BuildDungeonSml(blocks, block_size, tile_model_path);
+    return true;
+}
+
 static std::string ResolveAssetPath(const std::string& path, const char* prefix) {
     if (path.empty())
         return path;
@@ -501,8 +668,8 @@ static bool ParseDungeon(const std::string& text,
         if (row_counts[i] > max_rows)
             max_rows = row_counts[i];
 
-    float offset_x = -0.5f * (max_cols - 1) * block_size;
-    float offset_z = -0.5f * (max_rows - 1) * block_size;
+    float offset_x = block_size * 0.5f;
+    float offset_z = block_size * 0.5f;
     for (size_t i = 0; i < blocks.size(); ++i) {
         blocks[i].x = blocks[i].x * block_size + offset_x;
         blocks[i].z = blocks[i].z * block_size + offset_z;
@@ -866,20 +1033,6 @@ int main(int, char**) {
         fprintf(stderr, "SML parse error: %s\n", parse_error.c_str());
     }
 
-    const char* dungeon_path = "RaidBuilder/dungeon.sml";
-    std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
-    std::vector<unsigned char> selected_flags;
-    std::string block_texture_path = "RaidBuilder/assets/textures/raid_stone.png";
-    std::string dungeon_text;
-    std::string dungeon_error;
-    if (!LoadFileText(dungeon_path, &dungeon_text)) {
-        fprintf(stderr, "Dungeon load error: could not read %s\n", dungeon_path);
-    } else if (!ParseDungeon(dungeon_text, 0.6f, &dungeon_blocks, &block_texture_path, &dungeon_error)) {
-        fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
-    }
-    block_texture_path = ResolveAssetPath(block_texture_path, "RaidBuilder/");
-    selected_flags.assign(dungeon_blocks.size(), 0);
-
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
         return 1;
@@ -906,12 +1059,36 @@ int main(int, char**) {
         ui_window.size.x = saved_state.size_x;
         ui_window.size.y = saved_state.size_y;
     }
+    std::string current_dungeon_path = "RaidBuilder/dungeon.sml";
+    if (ui_window.state.last_file_path && !saved_state.last_file_path.empty() && FileExists(saved_state.last_file_path)) {
+        current_dungeon_path = saved_state.last_file_path;
+    }
+    const float block_size = 0.6f;
+    std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
+    std::vector<unsigned char> selected_flags;
+    std::string block_texture_path = "RaidBuilder/assets/textures/raid_stone.png";
+    std::string tile_model_path = block_texture_path;
+    std::string dungeon_text;
+    std::string dungeon_error;
+    if (!LoadFileText(current_dungeon_path.c_str(), &dungeon_text)) {
+        fprintf(stderr, "Dungeon load error: could not read %s\n", current_dungeon_path.c_str());
+    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &block_texture_path, &dungeon_error)) {
+        fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
+    }
+    tile_model_path = block_texture_path;
+    block_texture_path = ResolveAssetPath(block_texture_path, "RaidBuilder/");
+    selected_flags.assign(dungeon_blocks.size(), 0);
+    g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     const char* window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title.c_str();
     GLFWwindow* window = glfwCreateWindow((int)(ui_window.size.x * main_scale), (int)(ui_window.size.y * main_scale), window_title, nullptr, nullptr);
     if (!glfwVulkanSupported()) {
         printf("GLFW: Vulkan Not Supported\n");
         return 1;
     }
+
+#if defined(__APPLE__)
+    BuildMacMainMenu(window, ui_window);
+#endif
 
     ImVector<const char*> extensions;
     uint32_t extensions_count = 0;
@@ -995,7 +1172,6 @@ int main(int, char**) {
     bool first_mouse = true;
     float camera_x = 6.0f;
     float camera_z = 6.0f;
-    const float block_size = 0.6f;
     const float eye_height = 1.6f;
     float camera_y = eye_height;
     float vertical_velocity = 0.0f;
@@ -1006,7 +1182,10 @@ int main(int, char**) {
     bool q_was_down = false;
     bool g_was_down = false;
     bool esc_was_down = false;
+    bool save_was_down = false;
     bool right_was_down = false;
+    bool left_was_down = false;
+    bool suppress_backward = false;
     bool painting = false;
     bool ghost_hover_last = false;
     int paint_count = 0;
@@ -1090,6 +1269,32 @@ int main(int, char**) {
         } else {
             esc_was_down = false;
         }
+
+        bool save_key_down = (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+        bool cmd_down = (glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS) ||
+                        (glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS);
+        bool ctrl_down = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) ||
+                         (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
+        bool save_combo = save_key_down && (cmd_down || ctrl_down);
+        if (save_combo && !save_was_down) {
+            if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tile_model_path)) {
+                saved_state.last_file_path = current_dungeon_path;
+                SaveAppState(state_path, saved_state);
+            }
+        }
+        if (!save_key_down && !cmd_down && !ctrl_down)
+            save_was_down = false;
+        else if (save_combo)
+            save_was_down = true;
+        if (!edit_mode) {
+            bool keyboard_backward = save_key_down;
+            if ((cmd_down || ctrl_down || save_combo) && keyboard_backward)
+                suppress_backward = true;
+            if (suppress_backward && !keyboard_backward)
+                suppress_backward = false;
+        } else {
+            suppress_backward = false;
+        }
         if (!edit_mode) {
             if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) {
                 if (!g_was_down) {
@@ -1144,8 +1349,10 @@ int main(int, char**) {
                 camera_z += forward_z * speed * dt;
             }
             if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
-                camera_x -= forward_x * speed * dt;
-                camera_z -= forward_z * speed * dt;
+                if (!suppress_backward) {
+                    camera_x -= forward_x * speed * dt;
+                    camera_z -= forward_z * speed * dt;
+                }
             }
             if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
                 camera_x -= right_x * speed * dt;
@@ -1258,6 +1465,7 @@ int main(int, char**) {
             }
 
             int right_state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT);
+            int left_state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
             if (has_best) {
                 if (best_hit.ground) {
                     hover_place_x = SnapToGridCenter(best_hit.hit_x, block_size);
@@ -1278,6 +1486,16 @@ int main(int, char**) {
             } else {
                 hover_has_block = false;
                 hover_has_ground = false;
+                hover_block_index = -1;
+            }
+
+            if (left_state == GLFW_PRESS && !left_was_down && hover_has_block && hover_block_index >= 0 &&
+                hover_block_index < (int)dungeon_blocks.size()) {
+                dungeon_blocks.erase(dungeon_blocks.begin() + hover_block_index);
+                selected_flags.assign(dungeon_blocks.size(), 0);
+                g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
+                g_VoxelRenderer.setSelection(selected_flags);
+                hover_has_block = false;
                 hover_block_index = -1;
             }
 
@@ -1394,6 +1612,7 @@ int main(int, char**) {
                 }
             }
             right_was_down = (right_state == GLFW_PRESS);
+            left_was_down = (left_state == GLFW_PRESS);
         }
 
         g_VoxelRenderer.setCamera(camera_x, camera_y, camera_z, camera_yaw, camera_pitch);
@@ -1620,7 +1839,7 @@ int main(int, char**) {
         out_state.maximized = (glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0);
     }
     if (ui_window.state.last_file_path)
-        out_state.last_file_path = dungeon_path;
+        out_state.last_file_path = current_dungeon_path;
     SaveAppState(state_path, out_state);
 
     vkDeviceWaitIdle(g_Device);

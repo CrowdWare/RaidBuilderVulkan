@@ -5,6 +5,11 @@ add_executable(RaidBuilder
     src/main.cpp
 )
 
+if(APPLE)
+    target_sources(RaidBuilder PRIVATE src/mac_menu.mm)
+    target_link_libraries(RaidBuilder PRIVATE "-framework Cocoa")
+endif()
+
 target_link_libraries(RaidBuilder
     PRIVATE VoxelEngine SMLParser SMLUI
 )

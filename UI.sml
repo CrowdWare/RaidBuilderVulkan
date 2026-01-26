@@ -30,6 +30,8 @@ Window {
             Separator {}
             MenuItem {
                 label: "Exit"
+                clicked: "exit"
+                useOnMac: false
             }
         }
     }
