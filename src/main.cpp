@@ -308,6 +308,13 @@ static std::string GetFileBaseName(const std::string& path) {
     return name;
 }
 
+static std::string GetFileName(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos)
+        return path;
+    return path.substr(slash + 1);
+}
+
 static std::string NextHistoryPath(const std::string& history_dir, const std::string& base_name) {
     for (int i = 1; i < 100000; ++i) {
         std::string candidate = history_dir + "/" + base_name + std::to_string(i) + ".sml";
@@ -326,6 +333,19 @@ static bool CopyFile(const std::string& src, const std::string& dst) {
         return false;
     out << in.rdbuf();
     return true;
+}
+
+static void UpdateWindowTitle(GLFWwindow* window,
+                              const std::string& base_title,
+                              const std::string& file_path,
+                              bool dirty) {
+    std::string file_name = GetFileName(file_path);
+    if (file_name.empty())
+        file_name = "untitled.sml";
+    std::string title = base_title + " - " + file_name;
+    if (dirty)
+        title += "*";
+    glfwSetWindowTitle(window, title.c_str());
 }
 
 struct AppState {
@@ -1079,8 +1099,8 @@ int main(int, char**) {
     block_texture_path = ResolveAssetPath(block_texture_path, "RaidBuilder/");
     selected_flags.assign(dungeon_blocks.size(), 0);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
-    const char* window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title.c_str();
-    GLFWwindow* window = glfwCreateWindow((int)(ui_window.size.x * main_scale), (int)(ui_window.size.y * main_scale), window_title, nullptr, nullptr);
+    std::string base_window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title;
+    GLFWwindow* window = glfwCreateWindow((int)(ui_window.size.x * main_scale), (int)(ui_window.size.y * main_scale), base_window_title.c_str(), nullptr, nullptr);
     if (!glfwVulkanSupported()) {
         printf("GLFW: Vulkan Not Supported\n");
         return 1;
@@ -1115,7 +1135,7 @@ int main(int, char**) {
                               block_texture_path.c_str())) {
         fprintf(stderr, "VoxelRenderer init failed (missing shaders?)\n");
     }
-    g_VoxelRenderer.setBlocks(dungeon_blocks, 0.6f);
+    g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     g_VoxelRenderer.setSelection(selected_flags);
     g_VoxelRenderer.resizePickResources((uint32_t)w, (uint32_t)h);
 
@@ -1166,6 +1186,10 @@ int main(int, char**) {
     glfwSetCursorPos(window, (ui_window.size.x * main_scale) * 0.5, (ui_window.size.y * main_scale) * 0.5);
 
     bool edit_mode = true;
+    bool dirty = false;
+    UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+    bool close_pending = false;
+    bool close_request = false;
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     double last_mouse_x = 0.0;
     double last_mouse_y = 0.0;
@@ -1221,6 +1245,14 @@ int main(int, char**) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        if (glfwWindowShouldClose(window)) {
+            if (dirty) {
+                close_pending = true;
+                glfwSetWindowShouldClose(window, GLFW_FALSE);
+            } else {
+                break;
+            }
+        }
         double now_time = glfwGetTime();
         float dt = (float)(now_time - last_time);
         last_time = now_time;
@@ -1280,6 +1312,8 @@ int main(int, char**) {
             if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tile_model_path)) {
                 saved_state.last_file_path = current_dungeon_path;
                 SaveAppState(state_path, saved_state);
+                dirty = false;
+                UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
             }
         }
         if (!save_key_down && !cmd_down && !ctrl_down)
@@ -1497,6 +1531,8 @@ int main(int, char**) {
                 g_VoxelRenderer.setSelection(selected_flags);
                 hover_has_block = false;
                 hover_block_index = -1;
+                dirty = true;
+                UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
             }
 
             if (ghost_enabled) {
@@ -1526,6 +1562,8 @@ int main(int, char**) {
                                 selected_flags.back() = 1;
                                 g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
                                 g_VoxelRenderer.setSelection(selected_flags);
+                                dirty = true;
+                                UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
                                 paint_last_x = place_x;
                                 paint_last_y = place_y;
                                 paint_last_z = place_z;
@@ -1569,6 +1607,8 @@ int main(int, char**) {
                             selected_flags.back() = 1;
                             g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
                             g_VoxelRenderer.setSelection(selected_flags);
+                            dirty = true;
+                            UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
                             paint_last_x = free_x;
                             paint_last_y = free_y;
                             paint_last_z = free_z;
@@ -1609,6 +1649,8 @@ int main(int, char**) {
                     selected_flags.back() = 1;
                     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
                     g_VoxelRenderer.setSelection(selected_flags);
+                    dirty = true;
+                    UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
                 }
             }
             right_was_down = (right_state == GLFW_PRESS);
@@ -1634,6 +1676,36 @@ int main(int, char**) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+
+        if (close_pending) {
+            ImGui::OpenPopup("Unsaved Changes");
+            close_pending = false;
+        }
+        bool close_popup_open = true;
+        if (ImGui::BeginPopupModal("Unsaved Changes", &close_popup_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("You have unsaved changes.");
+            ImGui::Separator();
+            if (ImGui::Button("Save")) {
+                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tile_model_path)) {
+                    saved_state.last_file_path = current_dungeon_path;
+                    SaveAppState(state_path, saved_state);
+                    dirty = false;
+                    UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+                    close_request = true;
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Ignore")) {
+                close_request = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
 
         if (edit_mode && selecting) {
             ImDrawList* draw_list = ImGui::GetForegroundDrawList();
@@ -1796,6 +1868,10 @@ int main(int, char**) {
                     }
                 }
             }
+        }
+
+        if (close_request) {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
