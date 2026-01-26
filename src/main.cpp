@@ -13,6 +13,8 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <map>
+#include <algorithm>
 
 #define PI_F 3.1415926f
 
@@ -93,19 +95,101 @@ static Mat4 mat4LookAt(float eye_x, float eye_y, float eye_z,
     return m;
 }
 
-static bool ProjectPoint(const Mat4& mvp, float x, float y, float z, int width, int height, ImVec2* out) {
+static bool ProjectToScreen(const Mat4& mvp, float x, float y, float z, const ImVec2& origin, const ImVec2& size, ImVec2* out) {
     float clip_x = mvp.m[0] * x + mvp.m[4] * y + mvp.m[8] * z + mvp.m[12];
     float clip_y = mvp.m[1] * x + mvp.m[5] * y + mvp.m[9] * z + mvp.m[13];
-    float clip_z = mvp.m[2] * x + mvp.m[6] * y + mvp.m[10] * z + mvp.m[14];
     float clip_w = mvp.m[3] * x + mvp.m[7] * y + mvp.m[11] * z + mvp.m[15];
-    if (clip_w <= 0.0f)
+    if (clip_w <= 0.0001f)
         return false;
     float ndc_x = clip_x / clip_w;
     float ndc_y = clip_y / clip_w;
-    float screen_x = (ndc_x * 0.5f + 0.5f) * (float)width;
-    float screen_y = (1.0f - (ndc_y * 0.5f + 0.5f)) * (float)height;
-    *out = ImVec2(screen_x, screen_y);
+    out->x = origin.x + (ndc_x * 0.5f + 0.5f) * size.x;
+    out->y = origin.y + (ndc_y * 0.5f + 0.5f) * size.y;
     return true;
+}
+
+static int FindBlockAt(const std::vector<voxel::VoxelRenderer::Block>& blocks, float x, float y, float z, float eps) {
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (std::fabs(blocks[i].x - x) < eps &&
+            std::fabs(blocks[i].y - y) < eps &&
+            std::fabs(blocks[i].z - z) < eps) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void ComputeAxisPlacement(bool dir_valid,
+                                 float dir_x,
+                                 float dir_y,
+                                 float dir_z,
+                                 float anchor_x,
+                                 float anchor_y,
+                                 float anchor_z,
+                                 float block_size,
+                                 float in_x,
+                                 float in_y,
+                                 float in_z,
+                                 float* out_x,
+                                 float* out_y,
+                                 float* out_z) {
+    if (!dir_valid) {
+        *out_x = in_x;
+        *out_y = in_y;
+        *out_z = in_z;
+        return;
+    }
+    float rx = in_x - anchor_x;
+    float ry = in_y - anchor_y;
+    float rz = in_z - anchor_z;
+    float dot = rx * dir_x + ry * dir_y + rz * dir_z;
+    if (dot < 0.0f)
+        dot = 0.0f;
+    float step = std::round(dot / block_size) * block_size;
+    *out_x = anchor_x + dir_x * step;
+    *out_y = anchor_y + dir_y * step;
+    *out_z = anchor_z + dir_z * step;
+}
+
+static bool FindNextFreePlacement(const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                                  float start_x,
+                                  float start_y,
+                                  float start_z,
+                                  float dir_x,
+                                  float dir_y,
+                                  float dir_z,
+                                  float block_size,
+                                  int max_steps,
+                                  float* out_x,
+                                  float* out_y,
+                                  float* out_z) {
+    float step_x = 0.0f;
+    float step_y = 0.0f;
+    float step_z = 0.0f;
+    if (dir_x > 0.5f) step_x = block_size;
+    else if (dir_x < -0.5f) step_x = -block_size;
+    if (dir_y > 0.5f) step_y = block_size;
+    else if (dir_y < -0.5f) step_y = -block_size;
+    if (dir_z > 0.5f) step_z = block_size;
+    else if (dir_z < -0.5f) step_z = -block_size;
+
+    float x = start_x;
+    float y = start_y;
+    float z = start_z;
+    for (int i = 0; i <= max_steps; ++i) {
+        if (FindBlockAt(blocks, x, y, z, 0.001f) < 0) {
+            *out_x = x;
+            *out_y = y;
+            *out_z = z;
+            return true;
+        }
+        if (step_x == 0.0f && step_y == 0.0f && step_z == 0.0f)
+            break;
+        x += step_x;
+        y += step_y;
+        z += step_z;
+    }
+    return false;
 }
 
 #define GLFW_INCLUDE_NONE
@@ -148,11 +232,29 @@ static bool LoadFileText(const char* path, std::string* out_text) {
     return true;
 }
 
-static bool ParseDungeon(const std::string& text, float block_size, std::vector<voxel::VoxelRenderer::Block>* out_blocks, std::string* error_message) {
+static std::string ResolveAssetPath(const std::string& path, const char* prefix) {
+    if (path.empty())
+        return path;
+    if (path[0] == '/' || path[0] == '.')
+        return path;
+    std::string prefix_str(prefix);
+    if (path.compare(0, prefix_str.size(), prefix_str) == 0)
+        return path;
+    return prefix_str + path;
+}
+
+static bool ParseDungeon(const std::string& text,
+                         float block_size,
+                         std::vector<voxel::VoxelRenderer::Block>* out_blocks,
+                         std::string* out_block_texture,
+                         std::string* error_message) {
     class DungeonHandler : public sml::SmlHandler {
     public:
         std::string lines;
         std::vector<std::string> stack;
+        std::string tile_key;
+        std::string tile_model;
+        std::map<std::string, std::string> tile_models;
 
         void startElement(const std::string& name) override { stack.push_back(name); }
         void onProperty(const std::string& name, const sml::PropertyValue& value) override {
@@ -160,9 +262,18 @@ static bool ParseDungeon(const std::string& text, float block_size, std::vector<
                 return;
             if (stack.back() == "TileMap" && name == "lines" && value.type == sml::PropertyValue::String)
                 lines = value.string_value;
+            if (stack.back() == "Tile" && name == "key" && value.type == sml::PropertyValue::String)
+                tile_key = value.string_value;
+            if (stack.back() == "Tile" && name == "model" && value.type == sml::PropertyValue::String)
+                tile_model = value.string_value;
         }
         void endElement(const std::string& name) override {
-            (void)name;
+            if (name == "Tile") {
+                if (!tile_key.empty() && !tile_model.empty())
+                    tile_models[tile_key] = tile_model;
+                tile_key.clear();
+                tile_model.clear();
+            }
             if (!stack.empty())
                 stack.pop_back();
         }
@@ -176,6 +287,12 @@ static bool ParseDungeon(const std::string& text, float block_size, std::vector<
         if (error_message)
             *error_message = e.what();
         return false;
+    }
+
+    if (out_block_texture) {
+        std::map<std::string, std::string>::const_iterator it = handler.tile_models.find("s");
+        if (it != handler.tile_models.end())
+            *out_block_texture = it->second;
     }
 
     if (handler.lines.empty()) {
@@ -236,6 +353,134 @@ static bool ParseDungeon(const std::string& text, float block_size, std::vector<
     }
 
     *out_blocks = blocks;
+    return true;
+}
+
+struct RaycastHit {
+    bool hit;
+    float t;
+    int block_index;
+    float nx;
+    float ny;
+    float nz;
+    float hit_x;
+    float hit_y;
+    float hit_z;
+    bool ground;
+};
+
+static float SnapToGridCenter(float v, float block_size) {
+    float cell = std::floor(v / block_size);
+    return (cell + 0.5f) * block_size;
+}
+
+static bool RayAabb(const float origin[3],
+                    const float dir[3],
+                    const float bmin[3],
+                    const float bmax[3],
+                    float* out_t,
+                    float* out_nx,
+                    float* out_ny,
+                    float* out_nz) {
+    float tmin = 0.0f;
+    float tmax = 1e30f;
+    float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        float o = origin[axis];
+        float d = dir[axis];
+        float min_v = bmin[axis];
+        float max_v = bmax[axis];
+        if (std::fabs(d) < 1e-6f) {
+            if (o < min_v || o > max_v)
+                return false;
+            continue;
+        }
+        float inv = 1.0f / d;
+        float t1 = (min_v - o) * inv;
+        float t2 = (max_v - o) * inv;
+        float nsign = -1.0f;
+        if (t1 > t2) {
+            std::swap(t1, t2);
+            nsign = 1.0f;
+        }
+        if (t1 > tmin) {
+            tmin = t1;
+            nx = (axis == 0) ? nsign : 0.0f;
+            ny = (axis == 1) ? nsign : 0.0f;
+            nz = (axis == 2) ? nsign : 0.0f;
+        }
+        if (t2 < tmax)
+            tmax = t2;
+        if (tmin > tmax)
+            return false;
+    }
+    float t = (tmin >= 0.0f) ? tmin : tmax;
+    if (t < 0.0f)
+        return false;
+    *out_t = t;
+    *out_nx = nx;
+    *out_ny = ny;
+    *out_nz = nz;
+    return true;
+}
+
+static bool RaycastBlocks(const float origin[3],
+                          const float dir[3],
+                          const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                          float block_size,
+                          RaycastHit* out_hit) {
+    bool hit = false;
+    float best_t = 1e30f;
+    int best_index = -1;
+    float best_nx = 0.0f, best_ny = 0.0f, best_nz = 0.0f;
+    float half = block_size * 0.5f;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        float bmin[3] = {blocks[i].x - half, blocks[i].y - half, blocks[i].z - half};
+        float bmax[3] = {blocks[i].x + half, blocks[i].y + half, blocks[i].z + half};
+        float t = 0.0f;
+        float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+        if (RayAabb(origin, dir, bmin, bmax, &t, &nx, &ny, &nz)) {
+            if (t < best_t) {
+                best_t = t;
+                best_index = (int)i;
+                best_nx = nx;
+                best_ny = ny;
+                best_nz = nz;
+                hit = true;
+            }
+        }
+    }
+    if (!hit)
+        return false;
+    out_hit->hit = true;
+    out_hit->t = best_t;
+    out_hit->block_index = best_index;
+    out_hit->nx = best_nx;
+    out_hit->ny = best_ny;
+    out_hit->nz = best_nz;
+    out_hit->hit_x = origin[0] + dir[0] * best_t;
+    out_hit->hit_y = origin[1] + dir[1] * best_t;
+    out_hit->hit_z = origin[2] + dir[2] * best_t;
+    out_hit->ground = false;
+    return true;
+}
+
+static bool RaycastGround(const float origin[3], const float dir[3], RaycastHit* out_hit) {
+    if (std::fabs(dir[1]) < 1e-6f)
+        return false;
+    float t = -origin[1] / dir[1];
+    if (t < 0.0f)
+        return false;
+    out_hit->hit = true;
+    out_hit->t = t;
+    out_hit->block_index = -1;
+    out_hit->nx = 0.0f;
+    out_hit->ny = 1.0f;
+    out_hit->nz = 0.0f;
+    out_hit->hit_x = origin[0] + dir[0] * t;
+    out_hit->hit_y = 0.0f;
+    out_hit->hit_z = origin[2] + dir[2] * t;
+    out_hit->ground = true;
     return true;
 }
 
@@ -467,13 +712,15 @@ int main(int, char**) {
     const char* dungeon_path = "RaidBuilder/dungeon.sml";
     std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
     std::vector<unsigned char> selected_flags;
+    std::string block_texture_path = "RaidBuilder/assets/textures/raid_stone.png";
     std::string dungeon_text;
     std::string dungeon_error;
     if (!LoadFileText(dungeon_path, &dungeon_text)) {
         fprintf(stderr, "Dungeon load error: could not read %s\n", dungeon_path);
-    } else if (!ParseDungeon(dungeon_text, 0.6f, &dungeon_blocks, &dungeon_error)) {
+    } else if (!ParseDungeon(dungeon_text, 0.6f, &dungeon_blocks, &block_texture_path, &dungeon_error)) {
         fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
     }
+    block_texture_path = ResolveAssetPath(block_texture_path, "RaidBuilder/");
     selected_flags.assign(dungeon_blocks.size(), 0);
 
     glfwSetErrorCallback(glfw_error_callback);
@@ -512,7 +759,9 @@ int main(int, char**) {
                               "RaidBuilder/shaders/world.vert.spv",
                               "RaidBuilder/shaders/world.frag.spv",
                               "RaidBuilder/shaders/pick.vert.spv",
-                              "RaidBuilder/shaders/pick.frag.spv")) {
+                              "RaidBuilder/shaders/pick.frag.spv",
+                              "RaidBuilder/assets/textures/raid_ground.png",
+                              block_texture_path.c_str())) {
         fprintf(stderr, "VoxelRenderer init failed (missing shaders?)\n");
     }
     g_VoxelRenderer.setBlocks(dungeon_blocks, 0.6f);
@@ -563,8 +812,8 @@ int main(int, char**) {
     glfwSetWindowPos(window, (int)(ui_window.position.x * main_scale), (int)(ui_window.position.y * main_scale));
     glfwSetCursorPos(window, (ui_window.size.x * main_scale) * 0.5, (ui_window.size.y * main_scale) * 0.5);
 
-    bool edit_mode = false;
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    bool edit_mode = true;
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     double last_mouse_x = 0.0;
     double last_mouse_y = 0.0;
     bool first_mouse = true;
@@ -579,9 +828,36 @@ int main(int, char**) {
     bool f_was_down = false;
     bool e_was_down = false;
     bool q_was_down = false;
+    bool g_was_down = false;
+    bool right_was_down = false;
+    bool painting = false;
+    int paint_count = 0;
+    bool paint_last_valid = false;
+    float paint_last_x = 0.0f;
+    float paint_last_y = 0.0f;
+    float paint_last_z = 0.0f;
+    bool paint_dir_valid = false;
+    float paint_dir_x = 0.0f;
+    float paint_dir_y = 0.0f;
+    float paint_dir_z = 0.0f;
+    float paint_anchor_x = 0.0f;
+    float paint_anchor_y = 0.0f;
+    float paint_anchor_z = 0.0f;
     bool selecting = false;
     ImVec2 select_start(0.0f, 0.0f);
     ImVec2 select_end(0.0f, 0.0f);
+    bool hover_has_block = false;
+    bool hover_has_ground = false;
+    int hover_block_index = -1;
+    float hover_face_nx = 0.0f;
+    float hover_face_ny = 0.0f;
+    float hover_face_nz = 0.0f;
+    float hover_place_x = 0.0f;
+    float hover_place_y = 0.0f;
+    float hover_place_z = 0.0f;
+    bool ghost_enabled = false;
+    const int max_paint_blocks = 30; // TODO: make configurable.
+    const float max_place_distance = 30.0f;
     double last_time = glfwGetTime();
 
     ImVec4 clear_color = ImVec4(0.18f, 0.35f, 0.75f, 1.00f);
@@ -598,10 +874,33 @@ int main(int, char**) {
                 glfwSetInputMode(window, GLFW_CURSOR, edit_mode ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
                 first_mouse = true;
                 selecting = false;
+                right_was_down = false;
+                hover_has_block = false;
+                hover_has_ground = false;
+                hover_block_index = -1;
+                if (!edit_mode) {
+                    std::fill(selected_flags.begin(), selected_flags.end(), 0);
+                    g_VoxelRenderer.setSelection(selected_flags);
+                }
             }
             f_was_down = true;
         } else {
             f_was_down = false;
+        }
+        if (!edit_mode) {
+            if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) {
+                if (!g_was_down) {
+                    ghost_enabled = !ghost_enabled;
+                    painting = false;
+                    paint_last_valid = false;
+                    paint_dir_valid = false;
+                }
+                g_was_down = true;
+            } else {
+                g_was_down = false;
+            }
+        } else {
+            g_was_down = false;
         }
 
         double mouse_x = 0.0, mouse_y = 0.0;
@@ -719,6 +1018,181 @@ int main(int, char**) {
             }
         }
 
+        if (!edit_mode) {
+            float cp = std::cos(camera_pitch);
+            float sp = std::sin(camera_pitch);
+            float cy = std::cos(camera_yaw);
+            float sy = std::sin(camera_yaw);
+            float ray_origin[3] = {camera_x, camera_y, camera_z};
+            float ray_dir[3] = {cp * cy, sp, cp * sy};
+
+            RaycastHit block_hit = {};
+            RaycastHit ground_hit = {};
+            bool has_block = RaycastBlocks(ray_origin, ray_dir, dungeon_blocks, block_size, &block_hit);
+            bool has_ground = RaycastGround(ray_origin, ray_dir, &ground_hit);
+
+            RaycastHit best_hit = {};
+            bool has_best = false;
+            if (has_block && (!has_ground || block_hit.t <= ground_hit.t)) {
+                best_hit = block_hit;
+                has_best = true;
+            } else if (has_ground) {
+                best_hit = ground_hit;
+                has_best = true;
+            }
+
+            hover_has_block = has_block;
+            hover_has_ground = has_best && best_hit.ground;
+            hover_block_index = has_block ? block_hit.block_index : -1;
+            if (has_block) {
+                hover_face_nx = block_hit.nx;
+                hover_face_ny = block_hit.ny;
+                hover_face_nz = block_hit.nz;
+            } else {
+                hover_face_nx = 0.0f;
+                hover_face_ny = 1.0f;
+                hover_face_nz = 0.0f;
+            }
+
+            int right_state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT);
+            if (has_best) {
+                if (best_hit.ground) {
+                    hover_place_x = SnapToGridCenter(best_hit.hit_x, block_size);
+                    hover_place_z = SnapToGridCenter(best_hit.hit_z, block_size);
+                    hover_place_y = block_size * 0.5f;
+                    hover_face_nx = 0.0f;
+                    hover_face_ny = 1.0f;
+                    hover_face_nz = 0.0f;
+                } else {
+                    const voxel::VoxelRenderer::Block& base = dungeon_blocks[best_hit.block_index];
+                    hover_place_x = base.x + best_hit.nx * block_size;
+                    hover_place_y = base.y + best_hit.ny * block_size;
+                    hover_place_z = base.z + best_hit.nz * block_size;
+                    hover_face_nx = best_hit.nx;
+                    hover_face_ny = best_hit.ny;
+                    hover_face_nz = best_hit.nz;
+                }
+            } else {
+                hover_has_block = false;
+                hover_has_ground = false;
+                hover_block_index = -1;
+            }
+
+            if (ghost_enabled) {
+                if (right_state == GLFW_PRESS) {
+                    if (!painting) {
+                        painting = true;
+                        paint_count = 0;
+                        paint_last_valid = false;
+                        paint_dir_valid = false;
+                    }
+                    if (has_best && paint_count < max_paint_blocks) {
+                        float place_x = hover_place_x;
+                        float place_y = hover_place_y;
+                        float place_z = hover_place_z;
+                        float dir_x = paint_dir_valid ? paint_dir_x : hover_face_nx;
+                        float dir_y = paint_dir_valid ? paint_dir_y : hover_face_ny;
+                        float dir_z = paint_dir_valid ? paint_dir_z : hover_face_nz;
+                        if (paint_dir_valid) {
+                            ComputeAxisPlacement(true,
+                                                 paint_dir_x, paint_dir_y, paint_dir_z,
+                                                 paint_anchor_x, paint_anchor_y, paint_anchor_z,
+                                                 block_size,
+                                                 place_x, place_y, place_z,
+                                                 &place_x, &place_y, &place_z);
+                        }
+                        float dx = place_x - camera_x;
+                        float dy = place_y - camera_y;
+                        float dz = place_z - camera_z;
+                        float dist2 = dx * dx + dy * dy + dz * dz;
+                        if (dist2 <= max_place_distance * max_place_distance) {
+                            bool dir_ok = true;
+                            if (paint_dir_valid) {
+                                float rx = place_x - paint_anchor_x;
+                                float ry = place_y - paint_anchor_y;
+                                float rz = place_z - paint_anchor_z;
+                                float dot = rx * paint_dir_x + ry * paint_dir_y + rz * paint_dir_z;
+                                float off_x = rx - paint_dir_x * dot;
+                                float off_y = ry - paint_dir_y * dot;
+                                float off_z = rz - paint_dir_z * dot;
+                                float off_len2 = off_x * off_x + off_y * off_y + off_z * off_z;
+                                dir_ok = (dot >= -0.001f) && (off_len2 <= 0.0001f);
+                            }
+                            float free_x = place_x;
+                            float free_y = place_y;
+                            float free_z = place_z;
+                            bool free_ok = FindNextFreePlacement(dungeon_blocks,
+                                                                 place_x, place_y, place_z,
+                                                                 dir_x, dir_y, dir_z,
+                                                                 block_size, max_paint_blocks,
+                                                                 &free_x, &free_y, &free_z);
+                            bool same_as_last = paint_last_valid &&
+                                                std::fabs(free_x - paint_last_x) < 0.001f &&
+                                                std::fabs(free_y - paint_last_y) < 0.001f &&
+                                                std::fabs(free_z - paint_last_z) < 0.001f;
+                            if (free_ok && dir_ok && !same_as_last) {
+                                voxel::VoxelRenderer::Block new_block = {place_x, place_y, place_z};
+                                new_block.x = free_x;
+                                new_block.y = free_y;
+                                new_block.z = free_z;
+                                dungeon_blocks.push_back(new_block);
+                                selected_flags.assign(dungeon_blocks.size(), 0);
+                                selected_flags.back() = 1;
+                                g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
+                                g_VoxelRenderer.setSelection(selected_flags);
+                                paint_last_x = free_x;
+                                paint_last_y = free_y;
+                                paint_last_z = free_z;
+                                paint_last_valid = true;
+                                if (!paint_dir_valid) {
+                                    paint_dir_x = dir_x;
+                                    paint_dir_y = dir_y;
+                                    paint_dir_z = dir_z;
+                                    paint_anchor_x = free_x;
+                                    paint_anchor_y = free_y;
+                                    paint_anchor_z = free_z;
+                                    paint_dir_valid = true;
+                                }
+                                paint_count++;
+                            }
+                        }
+                    }
+                } else {
+                    painting = false;
+                    paint_last_valid = false;
+                    paint_dir_valid = false;
+                }
+            } else if (right_state == GLFW_PRESS && !right_was_down && has_best) {
+                float place_x = hover_place_x;
+                float place_y = hover_place_y;
+                float place_z = hover_place_z;
+                float dir_x = hover_face_nx;
+                float dir_y = hover_face_ny;
+                float dir_z = hover_face_nz;
+                float dx = place_x - camera_x;
+                float dy = place_y - camera_y;
+                float dz = place_z - camera_z;
+                float dist2 = dx * dx + dy * dy + dz * dz;
+                float free_x = place_x;
+                float free_y = place_y;
+                float free_z = place_z;
+                bool free_ok = FindNextFreePlacement(dungeon_blocks,
+                                                     place_x, place_y, place_z,
+                                                     dir_x, dir_y, dir_z,
+                                                     block_size, max_paint_blocks,
+                                                     &free_x, &free_y, &free_z);
+                if (dist2 <= max_place_distance * max_place_distance && free_ok) {
+                    voxel::VoxelRenderer::Block new_block = {free_x, free_y, free_z};
+                    dungeon_blocks.push_back(new_block);
+                    selected_flags.assign(dungeon_blocks.size(), 0);
+                    selected_flags.back() = 1;
+                    g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
+                    g_VoxelRenderer.setSelection(selected_flags);
+                }
+            }
+            right_was_down = (right_state == GLFW_PRESS);
+        }
+
         g_VoxelRenderer.setCamera(camera_x, camera_y, camera_z, camera_yaw, camera_pitch);
 
         int fb_width, fb_height;
@@ -744,9 +1218,179 @@ int main(int, char**) {
             ImU32 color = IM_COL32(255, 255, 0, 255);
             draw_list->AddRect(select_start, select_end, color, 0.0f, 0, 2.0f);
         }
+        if (!edit_mode) {
+            ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+            ImGuiViewport* vp = ImGui::GetMainViewport();
+            ImVec2 center(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
+            float size = 6.0f * main_scale;
+            ImU32 color = IM_COL32(255, 255, 255, 220);
+            draw_list->AddLine(ImVec2(center.x - size, center.y), ImVec2(center.x + size, center.y), color, 2.0f);
+            draw_list->AddLine(ImVec2(center.x, center.y - size), ImVec2(center.x, center.y + size), color, 2.0f);
+
+            float aspect = (vp->Size.y > 0.0f) ? (vp->Size.x / vp->Size.y) : 1.0f;
+            Mat4 proj = mat4Perspective(60.0f * (PI_F / 180.0f), aspect, 0.1f, 100.0f);
+            proj.m[5] *= -1.0f;
+            float cp = std::cos(camera_pitch);
+            float sp = std::sin(camera_pitch);
+            float cy = std::cos(camera_yaw);
+            float sy = std::sin(camera_yaw);
+            float fx = cp * cy;
+            float fy = sp;
+            float fz = cp * sy;
+            Mat4 view = mat4LookAt(camera_x, camera_y, camera_z,
+                                   camera_x + fx, camera_y + fy, camera_z + fz,
+                                   0.0f, 1.0f, 0.0f);
+            Mat4 mvp = mat4Multiply(proj, view);
+
+            if (hover_has_block && hover_block_index >= 0 && hover_block_index < (int)dungeon_blocks.size()) {
+                const voxel::VoxelRenderer::Block& base = dungeon_blocks[hover_block_index];
+                float half = block_size * 0.5f;
+                float center_x = base.x + hover_face_nx * half;
+                float center_y = base.y + hover_face_ny * half;
+                float center_z = base.z + hover_face_nz * half;
+
+                float tx = 0.0f, ty = 0.0f, tz = 0.0f;
+                float bx = 0.0f, by = 0.0f, bz = 0.0f;
+                if (std::fabs(hover_face_nx) > 0.5f) {
+                    ty = 1.0f;
+                    bz = 1.0f;
+                } else if (std::fabs(hover_face_ny) > 0.5f) {
+                    tx = 1.0f;
+                    bz = 1.0f;
+                } else {
+                    tx = 1.0f;
+                    by = 1.0f;
+                }
+
+                float corners[4][3] = {
+                    {center_x + (tx + bx) * half, center_y + (ty + by) * half, center_z + (tz + bz) * half},
+                    {center_x + (tx - bx) * half, center_y + (ty - by) * half, center_z + (tz - bz) * half},
+                    {center_x + (-tx - bx) * half, center_y + (-ty - by) * half, center_z + (-tz - bz) * half},
+                    {center_x + (-tx + bx) * half, center_y + (-ty + by) * half, center_z + (-tz + bz) * half},
+                };
+                ImVec2 points[4];
+                bool ok = true;
+                for (int i = 0; i < 4; ++i) {
+                    if (!ProjectToScreen(mvp, corners[i][0], corners[i][1], corners[i][2], vp->Pos, vp->Size, &points[i])) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    ImU32 face_color = IM_COL32(255, 230, 0, 220);
+                    draw_list->AddPolyline(points, 4, face_color, ImDrawFlags_Closed, 2.5f);
+                }
+            }
+
+            if (hover_has_ground) {
+                float half = block_size * 0.5f;
+                float corners[4][3] = {
+                    {hover_place_x + half, 0.0f, hover_place_z + half},
+                    {hover_place_x - half, 0.0f, hover_place_z + half},
+                    {hover_place_x - half, 0.0f, hover_place_z - half},
+                    {hover_place_x + half, 0.0f, hover_place_z - half},
+                };
+                ImVec2 points[4];
+                bool ok = true;
+                for (int i = 0; i < 4; ++i) {
+                    if (!ProjectToScreen(mvp, corners[i][0], corners[i][1], corners[i][2], vp->Pos, vp->Size, &points[i])) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    ImU32 ground_color = IM_COL32(255, 230, 0, 200);
+                    draw_list->AddPolyline(points, 4, ground_color, ImDrawFlags_Closed, 2.0f);
+                }
+            }
+
+            if (ghost_enabled && (hover_has_block || hover_has_ground)) {
+                float half = block_size * 0.5f;
+                float ghost_x = hover_place_x;
+                float ghost_y = hover_place_y;
+                float ghost_z = hover_place_z;
+                if (paint_dir_valid) {
+                    ComputeAxisPlacement(true,
+                                         paint_dir_x, paint_dir_y, paint_dir_z,
+                                         paint_anchor_x, paint_anchor_y, paint_anchor_z,
+                                         block_size,
+                                         ghost_x, ghost_y, ghost_z,
+                                         &ghost_x, &ghost_y, &ghost_z);
+                }
+                float dir_x = paint_dir_valid ? paint_dir_x : hover_face_nx;
+                float dir_y = paint_dir_valid ? paint_dir_y : hover_face_ny;
+                float dir_z = paint_dir_valid ? paint_dir_z : hover_face_nz;
+                float free_x = ghost_x;
+                float free_y = ghost_y;
+                float free_z = ghost_z;
+                bool free_ok = FindNextFreePlacement(dungeon_blocks,
+                                                     ghost_x, ghost_y, ghost_z,
+                                                     dir_x, dir_y, dir_z,
+                                                     block_size, max_paint_blocks,
+                                                     &free_x, &free_y, &free_z);
+                float center_x = free_x;
+                float center_y = free_y;
+                float center_z = free_z;
+                float corners[8][3] = {
+                    {center_x - half, center_y - half, center_z - half},
+                    {center_x + half, center_y - half, center_z - half},
+                    {center_x + half, center_y + half, center_z - half},
+                    {center_x - half, center_y + half, center_z - half},
+                    {center_x - half, center_y - half, center_z + half},
+                    {center_x + half, center_y - half, center_z + half},
+                    {center_x + half, center_y + half, center_z + half},
+                    {center_x - half, center_y + half, center_z + half},
+                };
+                ImVec2 p[8];
+                bool ok = free_ok;
+                for (int i = 0; i < 8; ++i) {
+                    if (!ProjectToScreen(mvp, corners[i][0], corners[i][1], corners[i][2], vp->Pos, vp->Size, &p[i])) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    ImU32 ghost_fill = IM_COL32(255, 255, 255, 40);
+                    ImU32 ghost_color = IM_COL32(255, 255, 255, 140);
+                    const int faces[6][4] = {
+                        {0, 1, 2, 3},
+                        {4, 5, 6, 7},
+                        {0, 1, 5, 4},
+                        {2, 3, 7, 6},
+                        {1, 2, 6, 5},
+                        {3, 0, 4, 7}
+                    };
+                    for (int f = 0; f < 6; ++f) {
+                        ImVec2 face[4] = {p[faces[f][0]], p[faces[f][1]], p[faces[f][2]], p[faces[f][3]]};
+                        draw_list->AddConvexPolyFilled(face, 4, ghost_fill);
+                    }
+                    const int edges[12][2] = {
+                        {0,1},{1,2},{2,3},{3,0},
+                        {4,5},{5,6},{6,7},{7,4},
+                        {0,4},{1,5},{2,6},{3,7}
+                    };
+                    for (int i = 0; i < 12; ++i) {
+                        draw_list->AddLine(p[edges[i][0]], p[edges[i][1]], ghost_color, 1.5f);
+                    }
+                }
+            }
+        }
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ui_document.render(viewport, font_15);
+        bool play_clicked = false;
+        ui_document.render(viewport, font_15, &play_clicked);
+        if (play_clicked) {
+            edit_mode = false;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            first_mouse = true;
+            selecting = false;
+            right_was_down = false;
+            hover_has_block = false;
+            hover_has_ground = false;
+            hover_block_index = -1;
+            std::fill(selected_flags.begin(), selected_flags.end(), 0);
+            g_VoxelRenderer.setSelection(selected_flags);
+        }
 
         ImGui::Render();
         ImDrawData* main_draw_data = ImGui::GetDrawData();

@@ -4,8 +4,9 @@ EXE = RaidBuilder
 SRCS = src/main.cpp
 OBJS = $(SRCS:.cpp=.o)
 
-CXXFLAGS = -std=c++11 -Iinclude -I../VoxelEngine/include -I../SMLParser/include -I../SMLUI/include -I../SMLUI/imgui -I../SMLUI/imgui/backends -O2 -Wall
+CXXFLAGS = -std=c++11 -Iinclude -I../VoxelEngine/include -I../SMLParser/include -I../SMLUI/include -I../SMLUI/imgui -I../SMLUI/imgui/backends -O2 -Wall -MMD -MP
 CXXFLAGS += $(shell pkg-config --cflags glfw3 vulkan)
+DEPS = $(OBJS:.o=.d)
 
 LDFLAGS = -L../VoxelEngine -L../SMLParser -L../SMLUI
 LDLIBS = -lVoxelEngine -lSMLParser -lSMLUI
@@ -35,8 +36,10 @@ $(EXE): ../VoxelEngine/libVoxelEngine.a ../SMLParser/libSMLParser.a ../SMLUI/lib
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
+-include $(DEPS)
+
 clean:
-	rm -f $(EXE) $(OBJS) $(SPV)
+	rm -f $(EXE) $(OBJS) $(SPV) $(DEPS)
 	$(MAKE) -C ../VoxelEngine clean
 	$(MAKE) -C ../SMLParser clean
 	$(MAKE) -C ../SMLUI clean
