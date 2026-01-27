@@ -86,8 +86,6 @@ add_custom_command(
             "$<TARGET_FILE:BlockBake>" ${CMAKE_CURRENT_SOURCE_DIR}/assets/blocks/stairs_convex.sml ${BLOCK_OUT_DIR}/stairs_convex.glb
     COMMAND ${CMAKE_COMMAND} -E env
             "$<TARGET_FILE:BlockBake>" ${CMAKE_CURRENT_SOURCE_DIR}/assets/blocks/vines.sml ${BLOCK_OUT_DIR}/vines.glb
-    COMMAND ${CMAKE_COMMAND} -E env
-            "$<TARGET_FILE:BlockBake>" ${CMAKE_CURRENT_SOURCE_DIR}/assets/blocks/dice.sml ${BLOCK_OUT_DIR}/dice.glb
     DEPENDS BlockBake ${BLOCK_SMLS}
     VERBATIM
 )

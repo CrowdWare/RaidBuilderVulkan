@@ -390,15 +390,6 @@ struct AppState {
     int size_x = 0;
     int size_y = 0;
     std::string last_file_path;
-    struct RollMapEntry {
-        int front = 0;
-        int north = 0;
-        int key = 0;
-        int axis = 0;
-        int dir = 1;
-        int enabled = 0;
-    };
-    std::vector<RollMapEntry> roll_map;
 };
 
 static std::string GetStatePath(const std::string& persist) {
@@ -511,13 +502,6 @@ static bool LoadAppState(const std::string& path, AppState* out_state) {
             out_state->maximized = (value == "1");
         } else if (key == "lastFilePath") {
             out_state->last_file_path = value;
-        } else if (key == "rollMap") {
-            AppState::RollMapEntry entry;
-            if (std::sscanf(value.c_str(), "%d,%d,%d,%d,%d,%d",
-                            &entry.front, &entry.north, &entry.key,
-                            &entry.axis, &entry.dir, &entry.enabled) == 6) {
-                out_state->roll_map.push_back(entry);
-            }
         }
     }
     return true;
@@ -535,11 +519,6 @@ static void SaveAppState(const std::string& path, const AppState& state) {
     file << "maximized=" << (state.maximized ? "1" : "0") << "\n";
     if (!state.last_file_path.empty())
         file << "lastFilePath=" << state.last_file_path << "\n";
-    for (size_t i = 0; i < state.roll_map.size(); ++i) {
-        const AppState::RollMapEntry& entry = state.roll_map[i];
-        file << "rollMap=" << entry.front << "," << entry.north << "," << entry.key << ","
-             << entry.axis << "," << entry.dir << "," << entry.enabled << "\n";
-    }
 }
 
 struct TileDef {
@@ -1398,44 +1377,11 @@ static Mat3 BlockRotationMatrix(const voxel::VoxelRenderer::Block& block) {
     return Mat3Multiply(rot_y, Mat3Multiply(rot_x, rot_z));
 }
 
-enum class FaceId {
-    Front = 0,  // +Z
-    Back = 1,   // -Z
-    Right = 2,  // +X
-    Left = 3,   // -X
-    Top = 4,    // +Y
-    Bottom = 5, // -Y
-};
-
 struct Vec3i;
 struct DiceOrientation;
 
-static FaceId OppositeFace(FaceId face);
-static FaceId FaceFromIndex(int idx);
-static bool ApplyFrontNorthToBlock(FaceId desired_front, FaceId desired_north, voxel::VoxelRenderer::Block* block);
 static DiceOrientation OrientationFromBlock(const voxel::VoxelRenderer::Block& block);
-static FaceId FaceFromWorldDir(const Vec3i& dir_world, const DiceOrientation& o);
-static Vec3i WorldDirFromFace(FaceId face, const DiceOrientation& o);
 static void ApplyWorldRotation90(DiceOrientation* o, raidbuilder::AxisId axis, int dir);
-static bool IsValidFrontNorth(FaceId front, FaceId north);
-static FaceId FaceAtWorldNorth(const DiceOrientation& o);
-
-static FaceId FaceFromLocalNormal(const float n_local[3]) {
-    int dominant_axis = 0;
-    float dominant_abs = std::fabs(n_local[0]);
-    if (std::fabs(n_local[1]) > dominant_abs) {
-        dominant_axis = 1;
-        dominant_abs = std::fabs(n_local[1]);
-    }
-    if (std::fabs(n_local[2]) > dominant_abs)
-        dominant_axis = 2;
-
-    if (dominant_axis == 0)
-        return (n_local[0] >= 0.0f) ? FaceId::Right : FaceId::Left;
-    if (dominant_axis == 1)
-        return (n_local[1] >= 0.0f) ? FaceId::Top : FaceId::Bottom;
-    return (n_local[2] >= 0.0f) ? FaceId::Front : FaceId::Back;
-}
 
 struct Vec3i {
     int x = 0;
@@ -1521,251 +1467,6 @@ struct DiceOrientation {
     Vec3i z_axis = MakeVec3i(0, 0, 1);
 };
 
-static std::vector<DiceOrientation> BuildAllDiceOrientations() {
-    std::vector<DiceOrientation> result;
-    const Vec3i dirs[6] = {
-        MakeVec3i(1, 0, 0),
-        MakeVec3i(-1, 0, 0),
-        MakeVec3i(0, 1, 0),
-        MakeVec3i(0, -1, 0),
-        MakeVec3i(0, 0, 1),
-        MakeVec3i(0, 0, -1),
-    };
-    for (int xi = 0; xi < 6; ++xi) {
-        for (int yi = 0; yi < 6; ++yi) {
-            if (DotVec3i(dirs[xi], dirs[yi]) != 0)
-                continue;
-            const Vec3i z = CrossVec3i(dirs[xi], dirs[yi]);
-            if (std::abs(z.x) + std::abs(z.y) + std::abs(z.z) != 1)
-                continue;
-            DiceOrientation o;
-            o.x_axis = dirs[xi];
-            o.y_axis = dirs[yi];
-            o.z_axis = z;
-            result.push_back(o);
-        }
-    }
-    return result;
-}
-
-static bool OrientationForFrontNorth(FaceId front, FaceId north, DiceOrientation* out) {
-    if (!out)
-        return false;
-    if (!IsValidFrontNorth(front, north))
-        return false;
-    static std::vector<DiceOrientation> all_orientations = BuildAllDiceOrientations();
-    for (size_t i = 0; i < all_orientations.size(); ++i) {
-        const DiceOrientation& o = all_orientations[i];
-        const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-        const FaceId north_face = FaceAtWorldNorth(o);
-        if (front_face == front && north_face == north) {
-            *out = o;
-            return true;
-        }
-    }
-    return false;
-}
-
-struct RollMappingEntry {
-    bool enabled = false;
-    raidbuilder::AxisId axis = raidbuilder::AxisId::X;
-    int dir = 1;
-};
-
-static bool WriteRollMapFile(const std::string& path, const std::vector<RollMappingEntry>& map) {
-    std::ofstream out(path.c_str(), std::ios::trunc);
-    if (!out.is_open())
-        return false;
-    out << "# rollMap: front,north,key,axis,dir,enabled\n";
-    for (int front = 0; front < 6; ++front) {
-        for (int north = 0; north < 6; ++north) {
-            for (int key = 0; key < 4; ++key) {
-                const size_t idx = (size_t)((front * 6 + north) * 4 + key);
-                if (idx >= map.size())
-                    continue;
-                const RollMappingEntry& entry = map[idx];
-                out << front << "," << north << "," << key << ","
-                    << (int)entry.axis << "," << entry.dir << "," << (entry.enabled ? 1 : 0) << "\n";
-            }
-        }
-    }
-    return true;
-}
-
-static int RollKeyIndexFromEdge(bool edge_up, bool edge_down, bool edge_left, bool edge_right) {
-    if (edge_up) return 0;
-    if (edge_down) return 1;
-    if (edge_left) return 2;
-    if (edge_right) return 3;
-    return -1;
-}
-
-static int RollMapIndex(FaceId front, FaceId north, int key) {
-    return (static_cast<int>(front) * 6 + static_cast<int>(north)) * 4 + key;
-}
-
-static bool IsValidFrontNorth(FaceId front, FaceId north) {
-    return !(front == north || north == OppositeFace(front));
-}
-
-static bool SolveMappingForState(FaceId front, FaceId north, std::vector<RollMappingEntry>* out_map) {
-    if (!out_map)
-        return false;
-    if (!IsValidFrontNorth(front, north))
-        return false;
-
-    DiceOrientation o;
-    if (!OrientationForFrontNorth(front, north, &o))
-        return false;
-    const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-    const Vec3i targets[4] = {
-        MakeVec3i(0, 1, 0),   // Up -> front to +Y
-        MakeVec3i(0, -1, 0),  // Down -> front to -Y
-        MakeVec3i(-1, 0, 0),  // Left -> front to -X
-        MakeVec3i(1, 0, 0),   // Right -> front to +X
-    };
-    const raidbuilder::AxisId axes[3] = {raidbuilder::AxisId::X, raidbuilder::AxisId::Y, raidbuilder::AxisId::Z};
-    const int dirs[2] = {1, -1};
-
-    for (int key = 0; key < 4; ++key) {
-        const int idx = RollMapIndex(front, north, key);
-        if (idx < 0 || idx >= (int)out_map->size())
-            continue;
-        RollMappingEntry& entry = (*out_map)[idx];
-        entry.enabled = false;
-        for (int ai = 0; ai < 3 && !entry.enabled; ++ai) {
-            for (int di = 0; di < 2 && !entry.enabled; ++di) {
-                DiceOrientation tmp = o;
-                ApplyWorldRotation90(&tmp, axes[ai], dirs[di]);
-                const Vec3i front_dir = WorldDirFromFace(front_face, tmp);
-                if (EqualVec3i(front_dir, targets[key])) {
-                    entry.enabled = true;
-                    entry.axis = axes[ai];
-                    entry.dir = dirs[di];
-                }
-            }
-        }
-    }
-    return true;
-}
-
-static int SolveMappingForOrientation(const DiceOrientation& o, std::vector<RollMappingEntry>* out_map) {
-    if (!out_map)
-        return 0;
-    const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-    const FaceId top_face = FaceFromWorldDir(MakeVec3i(0, 1, 0), o);
-    if (top_face == front_face || top_face == OppositeFace(front_face))
-        return 0;
-    const Vec3i targets[4] = {
-        MakeVec3i(0, 1, 0),   // Up -> front to +Y
-        MakeVec3i(0, -1, 0),  // Down -> front to -Y
-        MakeVec3i(-1, 0, 0),  // Left -> front to -X
-        MakeVec3i(1, 0, 0),   // Right -> front to +X
-    };
-    const raidbuilder::AxisId axes[3] = {raidbuilder::AxisId::X, raidbuilder::AxisId::Y, raidbuilder::AxisId::Z};
-    const int dirs[2] = {1, -1};
-
-    int solved = 0;
-    for (int key = 0; key < 4; ++key) {
-        const int idx = RollMapIndex(front_face, top_face, key);
-        if (idx < 0 || idx >= (int)out_map->size())
-            continue;
-        RollMappingEntry& entry = (*out_map)[idx];
-        entry.enabled = false;
-        for (int ai = 0; ai < 3 && !entry.enabled; ++ai) {
-            for (int di = 0; di < 2 && !entry.enabled; ++di) {
-                DiceOrientation tmp = o;
-                ApplyWorldRotation90(&tmp, axes[ai], dirs[di]);
-                const Vec3i front_dir = WorldDirFromFace(front_face, tmp);
-                if (EqualVec3i(front_dir, targets[key])) {
-                    entry.enabled = true;
-                    entry.axis = axes[ai];
-                    entry.dir = dirs[di];
-                    solved++;
-                }
-            }
-        }
-    }
-    return solved;
-}
-
-static void AutoSolveRollMap(std::vector<RollMappingEntry>* out_map) {
-    if (!out_map)
-        return;
-    out_map->assign(6 * 6 * 4, RollMappingEntry{});
-    std::vector<DiceOrientation> all_orientations = BuildAllDiceOrientations();
-    for (size_t i = 0; i < all_orientations.size(); ++i)
-        SolveMappingForOrientation(all_orientations[i], out_map);
-}
-
-static const char* FaceName(FaceId face);
-
-static const char* AxisName(raidbuilder::AxisId axis) {
-    if (axis == raidbuilder::AxisId::X) return "X";
-    if (axis == raidbuilder::AxisId::Y) return "Y";
-    return "Z";
-}
-
-static const char* DiceColorNameForFace(FaceId face) {
-    // Dice colors are defined in RaidBuilder/assets/blocks/dice.sml.
-    // Mapping from face direction to dominant color on that side:
-    // +X Right -> r (yellow), -X Left -> l (green),
-    // +Y Top   -> t (white),  -Y Bottom -> d (dark),
-    // +Z Front -> k (blue),   -Z Back -> f (red).
-    switch (face) {
-        case FaceId::Front:  return "Blue(k)";
-        case FaceId::Back:   return "Red(f)";
-        case FaceId::Right:  return "Yellow(r)";
-        case FaceId::Left:   return "Green(l)";
-        case FaceId::Top:    return "White(t)";
-        case FaceId::Bottom: return "Dark(d)";
-    }
-    return "?";
-}
-
-static const char* KeyName(int key) {
-    switch (key) {
-        case 0: return "Up(^)";
-        case 1: return "Down(v)";
-        case 2: return "Left(<)";
-        case 3: return "Right(>)";
-    }
-    return "?";
-}
-
-static void DumpRollMap(const std::vector<RollMappingEntry>& map) {
-    fprintf(stderr, "\n=== RollMap Debug Dump ===\n");
-    int enabled_count = 0;
-    for (int front = 0; front < 6; ++front) {
-        for (int top = 0; top < 6; ++top) {
-            if (top == front || (FaceId)top == OppositeFace((FaceId)front))
-                continue;
-            for (int key = 0; key < 4; ++key) {
-                const int idx = RollMapIndex((FaceId)front, (FaceId)top, key);
-                if (idx < 0 || idx >= (int)map.size())
-                    continue;
-                const RollMappingEntry& entry = map[idx];
-                if (entry.enabled) {
-                    ++enabled_count;
-                    fprintf(stderr, "front=%s top=%s key=%s axis=%s dir=%+d\n",
-                            FaceName((FaceId)front),
-                            FaceName((FaceId)top),
-                            KeyName(key),
-                            AxisName(entry.axis),
-                            entry.dir);
-                } else {
-                    fprintf(stderr, "MISSING front=%s top=%s key=%s\n",
-                            FaceName((FaceId)front),
-                            FaceName((FaceId)top),
-                            KeyName(key));
-                }
-            }
-        }
-    }
-    fprintf(stderr, "RollMap enabled entries: %d / 144\n", enabled_count);
-    fprintf(stderr, "=== End RollMap Debug Dump ===\n\n");
-}
-
 static DiceOrientation OrientationFromBlock(const voxel::VoxelRenderer::Block& block) {
     const Mat3 rot = BlockRotationMatrix(block);
     float col_x[3] = {rot.m[0], rot.m[1], rot.m[2]};
@@ -1785,45 +1486,6 @@ static void ApplyWorldRotation90(DiceOrientation* o, raidbuilder::AxisId axis, i
     o->x_axis = RotateVecAroundAxis90(o->x_axis, axis, dir);
     o->y_axis = RotateVecAroundAxis90(o->y_axis, axis, dir);
     o->z_axis = RotateVecAroundAxis90(o->z_axis, axis, dir);
-}
-
-static FaceId FaceFromWorldDir(const Vec3i& dir_world,
-                               const DiceOrientation& o) {
-    if (EqualVec3i(dir_world, o.z_axis))
-        return FaceId::Front;
-    if (EqualVec3i(dir_world, NegateVec3i(o.z_axis)))
-        return FaceId::Back;
-    if (EqualVec3i(dir_world, o.x_axis))
-        return FaceId::Right;
-    if (EqualVec3i(dir_world, NegateVec3i(o.x_axis)))
-        return FaceId::Left;
-    if (EqualVec3i(dir_world, o.y_axis))
-        return FaceId::Top;
-    return FaceId::Bottom;
-}
-
-static Vec3i WorldDirFromFace(FaceId face, const DiceOrientation& o) {
-    switch (face) {
-        case FaceId::Front: return o.z_axis;
-        case FaceId::Back: return NegateVec3i(o.z_axis);
-        case FaceId::Right: return o.x_axis;
-        case FaceId::Left: return NegateVec3i(o.x_axis);
-        case FaceId::Top: return o.y_axis;
-        case FaceId::Bottom: return NegateVec3i(o.y_axis);
-    }
-    return o.z_axis;
-}
-
-static const char* FaceName(FaceId face) {
-    switch (face) {
-        case FaceId::Front: return "Front(+Z)";
-        case FaceId::Back: return "Back(-Z)";
-        case FaceId::Right: return "Right(+X)";
-        case FaceId::Left: return "Left(-X)";
-        case FaceId::Top: return "Top(+Y)";
-        case FaceId::Bottom: return "Bottom(-Y)";
-    }
-    return "?";
 }
 
 static float ShortestDeltaDeg(float start_deg, float target_deg) {
@@ -1894,215 +1556,13 @@ static void ApplyOrientationToBlock(const DiceOrientation& target,
     block->rot_z_deg = (float)(best_rz * 90);
 }
 
-static FaceId OppositeFace(FaceId face) {
-    switch (face) {
-        case FaceId::Front: return FaceId::Back;
-        case FaceId::Back: return FaceId::Front;
-        case FaceId::Right: return FaceId::Left;
-        case FaceId::Left: return FaceId::Right;
-        case FaceId::Top: return FaceId::Bottom;
-        case FaceId::Bottom: return FaceId::Top;
-    }
-    return FaceId::Back;
-}
-
-static int FaceToIndex(FaceId face) {
-    return static_cast<int>(face);
-}
-
-static FaceId FaceFromIndex(int idx) {
-    idx = std::max(0, std::min(5, idx));
-    return static_cast<FaceId>(idx);
-}
-
-static FaceId FaceAtWorldNorth(const DiceOrientation& o) {
-    // North is -Z in world space (map top).
-    return FaceFromWorldDir(MakeVec3i(0, 0, -1), o);
-}
-
-static bool ApplyTopNorthToBlock(FaceId desired_top,
-                                 FaceId desired_north,
-                                 voxel::VoxelRenderer::Block* block) {
-    if (!block)
-        return false;
-    if (desired_north == desired_top || desired_north == OppositeFace(desired_top))
-        return false;
-
-    float best_score = 1e30f;
-    voxel::VoxelRenderer::Block best_block = *block;
-    bool found = false;
-    for (int rx = 0; rx < 4; ++rx) {
-        for (int ry = 0; ry < 4; ++ry) {
-            for (int rz = 0; rz < 4; ++rz) {
-                voxel::VoxelRenderer::Block candidate = *block;
-                candidate.rot_x_deg = (float)(rx * 90);
-                candidate.rot_y_deg = (float)(ry * 90);
-                candidate.rot_z_deg = (float)(rz * 90);
-                const DiceOrientation o = OrientationFromBlock(candidate);
-                const FaceId top_face = FaceFromWorldDir(MakeVec3i(0, 1, 0), o);
-                const FaceId north_face = FaceAtWorldNorth(o);
-                if (top_face != desired_top || north_face != desired_north)
-                    continue;
-                const float score =
-                    std::fabs(ShortestDeltaDeg(block->rot_x_deg, candidate.rot_x_deg)) +
-                    std::fabs(ShortestDeltaDeg(block->rot_y_deg, candidate.rot_y_deg)) +
-                    std::fabs(ShortestDeltaDeg(block->rot_z_deg, candidate.rot_z_deg));
-                if (!found || score < best_score) {
-                    best_score = score;
-                    best_block = candidate;
-                    found = true;
-                }
-            }
-        }
-    }
-    if (!found)
-        return false;
-    block->rot_x_deg = best_block.rot_x_deg;
-    block->rot_y_deg = best_block.rot_y_deg;
-    block->rot_z_deg = best_block.rot_z_deg;
-    return true;
-}
-
-static bool ApplyFrontNorthToBlock(FaceId desired_front,
-                                   FaceId desired_north,
-                                   voxel::VoxelRenderer::Block* block) {
-    if (!block)
-        return false;
-    if (desired_north == desired_front || desired_north == OppositeFace(desired_front))
-        return false;
-
-    float best_score = 1e30f;
-    voxel::VoxelRenderer::Block best_block = *block;
-    bool found = false;
-    for (int rx = 0; rx < 4; ++rx) {
-        for (int ry = 0; ry < 4; ++ry) {
-            for (int rz = 0; rz < 4; ++rz) {
-                voxel::VoxelRenderer::Block candidate = *block;
-                candidate.rot_x_deg = (float)(rx * 90);
-                candidate.rot_y_deg = (float)(ry * 90);
-                candidate.rot_z_deg = (float)(rz * 90);
-                const DiceOrientation o = OrientationFromBlock(candidate);
-                const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-                const FaceId north_face = FaceAtWorldNorth(o);
-                if (front_face != desired_front || north_face != desired_north)
-                    continue;
-                const float score =
-                    std::fabs(ShortestDeltaDeg(block->rot_x_deg, candidate.rot_x_deg)) +
-                    std::fabs(ShortestDeltaDeg(block->rot_y_deg, candidate.rot_y_deg)) +
-                    std::fabs(ShortestDeltaDeg(block->rot_z_deg, candidate.rot_z_deg));
-                if (!found || score < best_score) {
-                    best_score = score;
-                    best_block = candidate;
-                    found = true;
-                }
-            }
-        }
-    }
-    if (!found)
-        return false;
-    block->rot_x_deg = best_block.rot_x_deg;
-    block->rot_y_deg = best_block.rot_y_deg;
-    block->rot_z_deg = best_block.rot_z_deg;
-    return true;
-}
-
-static bool ApplyFrontTopToBlock(FaceId desired_front,
-                                 FaceId desired_top,
-                                 voxel::VoxelRenderer::Block* block) {
-    if (!block)
-        return false;
-    if (desired_top == desired_front || desired_top == OppositeFace(desired_front))
-        return false;
-
-    float best_score = 1e30f;
-    voxel::VoxelRenderer::Block best_block = *block;
-    bool found = false;
-    for (int rx = 0; rx < 4; ++rx) {
-        for (int ry = 0; ry < 4; ++ry) {
-            for (int rz = 0; rz < 4; ++rz) {
-                voxel::VoxelRenderer::Block candidate = *block;
-                candidate.rot_x_deg = (float)(rx * 90);
-                candidate.rot_y_deg = (float)(ry * 90);
-                candidate.rot_z_deg = (float)(rz * 90);
-                const DiceOrientation o = OrientationFromBlock(candidate);
-                const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-                const FaceId top_face = FaceFromWorldDir(MakeVec3i(0, 1, 0), o);
-                if (front_face != desired_front || top_face != desired_top)
-                    continue;
-                const float score =
-                    std::fabs(ShortestDeltaDeg(block->rot_x_deg, candidate.rot_x_deg)) +
-                    std::fabs(ShortestDeltaDeg(block->rot_y_deg, candidate.rot_y_deg)) +
-                    std::fabs(ShortestDeltaDeg(block->rot_z_deg, candidate.rot_z_deg));
-                if (!found || score < best_score) {
-                    best_score = score;
-                    best_block = candidate;
-                    found = true;
-                }
-            }
-        }
-    }
-    if (!found)
-        return false;
-    block->rot_x_deg = best_block.rot_x_deg;
-    block->rot_y_deg = best_block.rot_y_deg;
-    block->rot_z_deg = best_block.rot_z_deg;
-    return true;
-}
-
-static void SyncRollMapToState(const std::vector<RollMappingEntry>& map, AppState* state) {
-    if (!state)
-        return;
-    state->roll_map.clear();
-    state->roll_map.reserve(map.size());
-    for (int front = 0; front < 6; ++front) {
-        for (int north = 0; north < 6; ++north) {
-            for (int key = 0; key < 4; ++key) {
-                const size_t idx = (size_t)((front * 6 + north) * 4 + key);
-                if (idx >= map.size())
-                    continue;
-                const RollMappingEntry& entry = map[idx];
-                if (!entry.enabled)
-                    continue;
-                AppState::RollMapEntry st;
-                st.front = front;
-                st.north = north;
-                st.key = key;
-                st.axis = (int)entry.axis;
-                st.dir = entry.dir;
-                st.enabled = 1;
-                state->roll_map.push_back(st);
-            }
-        }
-    }
-}
-
-static void LoadRollMapFromState(const AppState& state, std::vector<RollMappingEntry>* out_map) {
-    if (!out_map)
-        return;
-    out_map->assign(6 * 6 * 4, RollMappingEntry{});
-    for (size_t i = 0; i < state.roll_map.size(); ++i) {
-        const AppState::RollMapEntry& st = state.roll_map[i];
-        if (st.front < 0 || st.front >= 6 || st.north < 0 || st.north >= 6 || st.key < 0 || st.key >= 4)
-            continue;
-        const size_t idx = (size_t)((st.front * 6 + st.north) * 4 + st.key);
-        if (idx >= out_map->size())
-            continue;
-        RollMappingEntry& entry = (*out_map)[idx];
-        entry.enabled = (st.enabled != 0);
-        entry.axis = (st.axis == 1) ? raidbuilder::AxisId::Y : (st.axis == 2 ? raidbuilder::AxisId::Z : raidbuilder::AxisId::X);
-        entry.dir = (st.dir >= 0) ? 1 : -1;
-    }
-}
-
 struct InspectorContext {
     std::vector<voxel::VoxelRenderer::Block>* blocks = nullptr;
     std::vector<unsigned char>* selected_flags = nullptr;
-    std::vector<RollMappingEntry>* roll_map = nullptr;
     float block_size = 1.0f;
     bool* dirty = nullptr;
     std::string* base_window_title = nullptr;
     std::string* current_dungeon_path = nullptr;
-    std::string* state_path = nullptr;
     GLFWwindow* window = nullptr;
     bool* close_dialog_active = nullptr;
     bool* edit_mode = nullptr;
@@ -2132,43 +1592,16 @@ static void RenderInspectorPanel(const ImVec2& panel_pos, const ImVec2& panel_si
         inspector_block_index = *ctx->hover_block_index;
     }
 
-    const char* face_labels[6] = {
-        "Front(+Z)",
-        "Back(-Z)",
-        "Right(+X)",
-        "Left(-X)",
-        "Top(+Y)",
-        "Bottom(-Y)",
-    };
-    const char* axis_labels[3] = {"X", "Y", "Z"};
-    const char* dir_labels[2] = {"+90", "-90"};
-
     ImGui::Separator();
     if (inspector_block_index >= 0 && inspector_block_index < (int)ctx->blocks->size()) {
         voxel::VoxelRenderer::Block& blk = (*ctx->blocks)[inspector_block_index];
-        static char autosolve_status[128] = "";
-        static double autosolve_time = 0.0;
         ImGui::Text("Block #%d  key=%s", inspector_block_index, blk.key.c_str());
         ImGui::Text("Rotation: X=%.0f  Y=%.0f  Z=%.0f", blk.rot_x_deg, blk.rot_y_deg, blk.rot_z_deg);
         if (ImGui::CollapsingHeader("Rotate Gizmo", ImGuiTreeNodeFlags_DefaultOpen)) {
-            auto snap90 = [](float deg) -> float {
-                int turns = (int)std::round(deg / 90.0f);
-                turns = ((turns % 4) + 4) % 4;
-                return (float)(turns * 90);
-            };
             auto apply_rotation = [&](raidbuilder::AxisId axis, int dir) {
-                if (blk.key == "D") {
-                    DiceOrientation o = OrientationFromBlock(blk);
-                    ApplyWorldRotation90(&o, axis, dir);
-                    ApplyOrientationToBlock(o, &blk);
-                } else {
-                    if (axis == raidbuilder::AxisId::X)
-                        blk.rot_x_deg = snap90(blk.rot_x_deg + dir * 90.0f);
-                    else if (axis == raidbuilder::AxisId::Y)
-                        blk.rot_y_deg = snap90(blk.rot_y_deg + dir * 90.0f);
-                    else
-                        blk.rot_z_deg = snap90(blk.rot_z_deg + dir * 90.0f);
-                }
+                DiceOrientation o = OrientationFromBlock(blk);
+                ApplyWorldRotation90(&o, axis, dir);
+                ApplyOrientationToBlock(o, &blk);
                 g_VoxelRenderer.setBlocks(*ctx->blocks, ctx->block_size);
                 if (ctx->dirty)
                     *ctx->dirty = true;
@@ -2184,125 +1617,6 @@ static void RenderInspectorPanel(const ImVec2& panel_pos, const ImVec2& panel_si
             if (ImGui::Button("Z +90")) apply_rotation(raidbuilder::AxisId::Z, 1);
             ImGui::SameLine();
             if (ImGui::Button("Z -90")) apply_rotation(raidbuilder::AxisId::Z, -1);
-        }
-        if (blk.key == "D") {
-            const DiceOrientation o = OrientationFromBlock(blk);
-            const FaceId top_face = FaceFromWorldDir(MakeVec3i(0, 1, 0), o);
-            const FaceId north_face = FaceAtWorldNorth(o);
-            int top_idx = FaceToIndex(top_face);
-            int north_idx = FaceToIndex(north_face);
-            bool changed = false;
-            if (ImGui::Combo("Dice Top (Up +Y)", &top_idx, face_labels, 6))
-                changed = true;
-            if (ImGui::Combo("Dice North (-Z)", &north_idx, face_labels, 6))
-                changed = true;
-            if (changed) {
-                const FaceId desired_top = FaceFromIndex(top_idx);
-                const FaceId desired_north = FaceFromIndex(north_idx);
-                if (!ApplyTopNorthToBlock(desired_top, desired_north, &blk)) {
-                    ImGui::OpenPopup("Invalid Dice Orientation");
-                } else {
-                    g_VoxelRenderer.setBlocks(*ctx->blocks, ctx->block_size);
-                    if (ctx->dirty)
-                        *ctx->dirty = true;
-                    if (ctx->window && ctx->base_window_title && ctx->current_dungeon_path && ctx->dirty)
-                        UpdateWindowTitle(ctx->window, *ctx->base_window_title, *ctx->current_dungeon_path, *ctx->dirty);
-                }
-            }
-            if (ImGui::BeginPopupModal("Invalid Dice Orientation", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::TextUnformatted("Top and North must be different and not opposites.");
-                if (ImGui::Button("OK"))
-                    ImGui::CloseCurrentPopup();
-                ImGui::EndPopup();
-            }
-            if (ImGui::CollapsingHeader("Matrix Navigator", ImGuiTreeNodeFlags_DefaultOpen)) {
-                static bool use_dice_state = true;
-                static int matrix_front_idx = 0;
-                static int matrix_north_idx = 1;
-                if (use_dice_state) {
-                    const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-                    matrix_front_idx = FaceToIndex(front_face);
-                    matrix_north_idx = FaceToIndex(north_face);
-                }
-                ImGui::Checkbox("Use Dice State", &use_dice_state);
-                ImGui::Combo("Matrix Front (+Z)", &matrix_front_idx, face_labels, 6);
-                ImGui::Combo("Matrix North (-Z)", &matrix_north_idx, face_labels, 6);
-                if (ImGui::Button("Apply Matrix State To Dice")) {
-                    const FaceId desired_front = FaceFromIndex(matrix_front_idx);
-                    const FaceId desired_north = FaceFromIndex(matrix_north_idx);
-                    if (!ApplyFrontNorthToBlock(desired_front, desired_north, &blk)) {
-                        ImGui::OpenPopup("Invalid Dice Orientation");
-                    } else {
-                        g_VoxelRenderer.setBlocks(*ctx->blocks, ctx->block_size);
-                        if (ctx->dirty)
-                            *ctx->dirty = true;
-                        if (ctx->window && ctx->base_window_title && ctx->current_dungeon_path && ctx->dirty)
-                            UpdateWindowTitle(ctx->window, *ctx->base_window_title, *ctx->current_dungeon_path, *ctx->dirty);
-                    }
-                }
-            }
-            if (ctx->roll_map && ImGui::CollapsingHeader("Roll Mapping", ImGuiTreeNodeFlags_DefaultOpen)) {
-                const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-                const FaceId top_face = FaceFromWorldDir(MakeVec3i(0, 1, 0), o);
-                ImGui::Text("Front: %s  Top: %s", face_labels[FaceToIndex(front_face)],
-                            face_labels[FaceToIndex(top_face)]);
-                {
-                    const std::vector<DiceOrientation> all_orientations = BuildAllDiceOrientations();
-                    ImGui::Text("Debug: orientations=%d  rollMapSize=%d", (int)all_orientations.size(),
-                                ctx->roll_map ? (int)ctx->roll_map->size() : -1);
-                }
-                if (ctx->state_path) {
-                    ImGui::Text("State file: %s", ctx->state_path->c_str());
-                }
-                int enabled_count = 0;
-                for (size_t i = 0; i < ctx->roll_map->size(); ++i)
-                    if ((*ctx->roll_map)[i].enabled)
-                        enabled_count++;
-                ImGui::Text("Mapping entries enabled: %d / %d", enabled_count, (int)ctx->roll_map->size());
-                ImGui::TextUnformatted("Mapping is read-only (baked).");
-                ImGui::TextUnformatted("Roll mapping is baked for consistency across machines.");
-                if (ImGui::Button("Dump RollMap To Log")) {
-                    DumpRollMap(*ctx->roll_map);
-                    std::snprintf(autosolve_status, sizeof(autosolve_status), "RollMap dumped to log");
-                    autosolve_time = glfwGetTime();
-                }
-                if (autosolve_status[0] != '\0') {
-                    ImVec4 color = ImVec4(0.3f, 0.9f, 0.4f, 1.0f);
-                    double now = glfwGetTime();
-                    if (now - autosolve_time < 2.0) {
-                        ImGui::TextColored(color, "%s", autosolve_status);
-                    } else {
-                        ImGui::Text("%s", autosolve_status);
-                    }
-                }
-                const int key_count = 4;
-                const char* key_labels[key_count] = {"Up(^)", "Down(v)", "Left(<)", "Right(>)"};
-                bool map_changed = false;
-                for (int key = 0; key < key_count; ++key) {
-                    const int idx = RollMapIndex(front_face, top_face, key);
-                    if (idx < 0 || idx >= (int)ctx->roll_map->size())
-                        continue;
-                    RollMappingEntry& entry = (*ctx->roll_map)[idx];
-                    ImGui::PushID(key);
-                    ImGui::Checkbox(key_labels[key], &entry.enabled);
-                    ImGui::SameLine();
-                    int axis_idx = (entry.axis == raidbuilder::AxisId::Y) ? 1 : (entry.axis == raidbuilder::AxisId::Z ? 2 : 0);
-                    int dir_idx = (entry.dir >= 0) ? 0 : 1;
-                    if (ImGui::Combo("Axis", &axis_idx, axis_labels, 3))
-                        map_changed = true;
-                    ImGui::SameLine();
-                    if (ImGui::Combo("Dir", &dir_idx, dir_labels, 2))
-                        map_changed = true;
-                    entry.axis = (axis_idx == 1) ? raidbuilder::AxisId::Y : (axis_idx == 2 ? raidbuilder::AxisId::Z : raidbuilder::AxisId::X);
-                    entry.dir = (dir_idx == 0) ? 1 : -1;
-                    if (entry.enabled)
-                        map_changed = true;
-                    ImGui::PopID();
-                }
-                if (map_changed && ctx->saved_state) {
-                    SyncRollMapToState(*ctx->roll_map, ctx->saved_state);
-                }
-            }
         }
     } else {
         ImGui::TextUnformatted("Hover or select a block to edit its properties.");
@@ -2682,10 +1996,6 @@ int main(int, char**) {
     AppState saved_state;
     std::string state_path = GetStatePath(ui_window.state.persist);
     LoadAppState(state_path, &saved_state);
-    // Roll mapping is deterministic and must be identical on all machines.
-    // We "bake" it at runtime and do not load it from user config to avoid divergence.
-    std::vector<RollMappingEntry> roll_map;
-    AutoSolveRollMap(&roll_map);
     if (ui_window.state.pos && saved_state.has_pos) {
         ui_window.position.x = saved_state.pos_x;
         ui_window.position.y = saved_state.pos_y;
@@ -2698,8 +2008,6 @@ int main(int, char**) {
     if (ui_window.state.last_file_path && !saved_state.last_file_path.empty() && FileExists(saved_state.last_file_path)) {
         current_dungeon_path = saved_state.last_file_path;
     }
-    fprintf(stderr, "State path: %s\n", state_path.c_str());
-    fprintf(stderr, "Dungeon path: %s\n", current_dungeon_path.c_str());
     const float block_size = 0.6f;
     std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
     std::vector<unsigned char> selected_flags;
@@ -2849,17 +2157,6 @@ int main(int, char**) {
     float rotation_anim_target_rx = 0.0f;
     float rotation_anim_target_ry = 0.0f;
     float rotation_anim_target_rz = 0.0f;
-    // Cache the roll axis/sign until the user moves the camera.
-    bool roll_axis_cached = false;
-    raidbuilder::AxisId roll_cached_axis = raidbuilder::AxisId::X;
-    float roll_cached_sign = 1.0f;
-    int roll_cached_block_index = -1;
-    float roll_last_cam_x = 0.0f;
-    float roll_last_cam_y = 0.0f;
-    float roll_last_cam_z = 0.0f;
-    float roll_last_cam_yaw = 0.0f;
-    float roll_last_cam_pitch = 0.0f;
-
     selected_flags.assign(dungeon_blocks.size(), 0);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     std::string base_window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title;
@@ -2984,11 +2281,6 @@ int main(int, char**) {
     float vertical_velocity = 0.0f;
     float camera_yaw = 3.1415926f * 0.75f;
     float camera_pitch = -0.5f;
-    roll_last_cam_x = camera_x;
-    roll_last_cam_y = camera_y;
-    roll_last_cam_z = camera_z;
-    roll_last_cam_yaw = camera_yaw;
-    roll_last_cam_pitch = camera_pitch;
     bool f_was_down = false;
     bool e_was_down = false;
     bool q_was_down = false;
@@ -3170,7 +2462,6 @@ int main(int, char**) {
         if (save_combo && !save_was_down) {
             if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                 saved_state.last_file_path = current_dungeon_path;
-                SyncRollMapToState(roll_map, &saved_state);
                 SaveAppState(state_path, saved_state);
                 dirty = false;
                 UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
@@ -3238,24 +2529,6 @@ int main(int, char**) {
         float speed = 5.0f;
 
         if (!edit_mode) {
-            {
-                const float cam_eps_pos = 0.001f;
-                const float cam_eps_ang = 0.0005f;
-                bool cam_moved =
-                    (std::fabs(camera_x - roll_last_cam_x) > cam_eps_pos) ||
-                    (std::fabs(camera_y - roll_last_cam_y) > cam_eps_pos) ||
-                    (std::fabs(camera_z - roll_last_cam_z) > cam_eps_pos) ||
-                    (std::fabs(camera_yaw - roll_last_cam_yaw) > cam_eps_ang) ||
-                    (std::fabs(camera_pitch - roll_last_cam_pitch) > cam_eps_ang);
-                if (cam_moved)
-                    roll_axis_cached = false;
-                roll_last_cam_x = camera_x;
-                roll_last_cam_y = camera_y;
-                roll_last_cam_z = camera_z;
-                roll_last_cam_yaw = camera_yaw;
-                roll_last_cam_pitch = camera_pitch;
-            }
-
             bool controls_blocked = (inventory_open && !close_dialog_active) || rotation_anim_active;
             if (!controls_blocked) {
                 if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
@@ -3385,33 +2658,11 @@ int main(int, char**) {
                 hover_block_index = -1;
             }
 
-            {
-                const float cam_eps_pos = 0.001f;
-                const float cam_eps_ang = 0.0005f;
-                bool cam_moved =
-                    (std::fabs(camera_x - roll_last_cam_x) > cam_eps_pos) ||
-                    (std::fabs(camera_y - roll_last_cam_y) > cam_eps_pos) ||
-                    (std::fabs(camera_z - roll_last_cam_z) > cam_eps_pos) ||
-                    (std::fabs(camera_yaw - roll_last_cam_yaw) > cam_eps_ang) ||
-                    (std::fabs(camera_pitch - roll_last_cam_pitch) > cam_eps_ang);
-                if (cam_moved)
-                    roll_axis_cached = false;
-                roll_last_cam_x = camera_x;
-                roll_last_cam_y = camera_y;
-                roll_last_cam_z = camera_z;
-                roll_last_cam_yaw = camera_yaw;
-                roll_last_cam_pitch = camera_pitch;
-            }
-
             bool controls_blocked = (inventory_open && !close_dialog_active) || rotation_anim_active;
             if (hover_has_block && hover_block_index >= 0 && hover_block_index < (int)dungeon_blocks.size()) {
                 selected_flags.assign(dungeon_blocks.size(), 0);
                 selected_flags[hover_block_index] = 1;
                 g_VoxelRenderer.setSelection(selected_flags);
-                if (hover_block_index != roll_cached_block_index) {
-                    roll_axis_cached = false;
-                    roll_cached_block_index = hover_block_index;
-                }
                 if (!controls_blocked) {
                     int tile_idx = 0;
                     std::map<std::string, int>::const_iterator it = tile_index_by_key.find(dungeon_blocks[hover_block_index].key);
@@ -3420,12 +2671,6 @@ int main(int, char**) {
                     bool symmetric = (tile_idx >= 0 && tile_idx < (int)tile_is_symmetric.size()) ? tile_is_symmetric[tile_idx] : false;
                     if (!symmetric) {
                         const int arrow_keys[4] = {GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP, GLFW_KEY_DOWN};
-                        auto snap90 = [](float deg) -> float {
-                            int turns = (int)std::round(deg / 90.0f);
-                            turns = ((turns % 4) + 4) % 4;
-                            return (float)(turns * 90);
-                        };
-                        const bool is_dice = (dungeon_blocks[hover_block_index].key == "D");
                         bool rotated = false;
                         bool down_left = (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS);
                         bool down_right = (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS);
@@ -3435,103 +2680,25 @@ int main(int, char**) {
                         bool edge_right = down_right && !arrow_was_down[1];
                         bool edge_up = down_up && !arrow_was_down[2];
                         bool edge_down = down_down && !arrow_was_down[3];
-                        bool handled_by_mapping = false;
-
-                        if (!roll_axis_cached && (edge_left || edge_right || edge_up || edge_down)) {
-                            // Keep the cache flags in sync with interaction, but compute the
-                            // actual roll axis/sign fresh on every roll press below.
-                            roll_axis_cached = true;
-                        }
 
                         float end_rx = dungeon_blocks[hover_block_index].rot_x_deg;
                         float end_ry = dungeon_blocks[hover_block_index].rot_y_deg;
                         float end_rz = dungeon_blocks[hover_block_index].rot_z_deg;
-                        const bool use_roll_map_for_dice = false;
-                        if (use_roll_map_for_dice && is_dice && (edge_left || edge_right || edge_up || edge_down) && roll_map.size() == 6 * 6 * 4) {
+                        if (edge_left || edge_right) {
+                            const int dir = edge_right ? 1 : -1;
                             const voxel::VoxelRenderer::Block& blk = dungeon_blocks[hover_block_index];
-                            const DiceOrientation o = OrientationFromBlock(blk);
-                            const FaceId front_face = FaceFromWorldDir(MakeVec3i(0, 0, 1), o);
-                            const FaceId top_face = FaceFromWorldDir(MakeVec3i(0, 1, 0), o);
-                            const int key_idx = RollKeyIndexFromEdge(edge_up, edge_down, edge_left, edge_right);
-                            if (key_idx >= 0) {
-                                const int map_idx = RollMapIndex(front_face, top_face, key_idx);
-                                if (map_idx >= 0 && map_idx < (int)roll_map.size()) {
-                                    const RollMappingEntry& entry = roll_map[map_idx];
-                                    std::printf("[rollmap] key=%s front=%s(%s) top=%s(%s) idx=%d enabled=%d axis=%s dir=%+d\n",
-                                                KeyName(key_idx),
-                                                FaceName(front_face),
-                                                DiceColorNameForFace(front_face),
-                                                FaceName(top_face),
-                                                DiceColorNameForFace(top_face),
-                                                map_idx,
-                                                entry.enabled ? 1 : 0,
-                                                AxisName(entry.axis),
-                                                entry.dir);
-                                    const FaceId right_face = FaceFromWorldDir(MakeVec3i(1, 0, 0), o);
-                                    const FaceId left_face = FaceFromWorldDir(MakeVec3i(-1, 0, 0), o);
-                                    const FaceId back_face = FaceFromWorldDir(MakeVec3i(0, 0, -1), o);
-                                    const FaceId bottom_face = FaceFromWorldDir(MakeVec3i(0, -1, 0), o);
-                                    std::printf("[rollmap] world colors: Front(+Z)=%s Back(-Z)=%s Left(-X)=%s Right(+X)=%s Top(+Y)=%s Bottom(-Y)=%s\n",
-                                                DiceColorNameForFace(front_face),
-                                                DiceColorNameForFace(back_face),
-                                                DiceColorNameForFace(left_face),
-                                                DiceColorNameForFace(right_face),
-                                                DiceColorNameForFace(top_face),
-                                                DiceColorNameForFace(bottom_face));
-                                    {
-                                        DiceOrientation predicted = o;
-                                        ApplyWorldRotation90(&predicted, entry.axis, entry.dir);
-                                        const FaceId after_front = FaceFromWorldDir(MakeVec3i(0, 0, 1), predicted);
-                                        const FaceId after_top = FaceFromWorldDir(MakeVec3i(0, 1, 0), predicted);
-                                        std::printf("[rollmap] predicted after: Front(+Z)=%s Top(+Y)=%s (axis=%s dir=%+d)\n",
-                                                    DiceColorNameForFace(after_front),
-                                                    DiceColorNameForFace(after_top),
-                                                    AxisName(entry.axis),
-                                                    entry.dir);
-                                    }
-                                    if (entry.enabled) {
-                                        const float delta = (float)(entry.dir * 90);
-                                        if (entry.axis == raidbuilder::AxisId::X)
-                                            end_rx = snap90(end_rx + delta);
-                                        else if (entry.axis == raidbuilder::AxisId::Y)
-                                            end_ry = snap90(end_ry + delta);
-                                        else
-                                            end_rz = snap90(end_rz + delta);
-                                        rotated = true;
-                                        handled_by_mapping = true;
-                                    }
-                                } else {
-                                    std::printf("[rollmap] front=%s top=%s key=%s idx=%d (out of range)\n",
-                                                FaceName(front_face),
-                                                FaceName(top_face),
-                                                KeyName(key_idx),
-                                                map_idx);
-                                }
-                            }
-                        }
-                        if (!handled_by_mapping && edge_left) {
-                            end_ry = snap90(end_ry - 90.0f);
-                            std::printf("[yaw] dir=L right=(%.3f,%.3f) fwd=(%.3f,%.3f) rotY=%.1f\n",
-                                        right_x,
-                                        right_z,
-                                        forward_x,
-                                        forward_z,
-                                        end_ry);
-                            rotated = true;
-                        }
-                        if (!handled_by_mapping && edge_right) {
-                            end_ry = snap90(end_ry + 90.0f);
-                            std::printf("[yaw] dir=R right=(%.3f,%.3f) fwd=(%.3f,%.3f) rotY=%.1f\n",
-                                        right_x,
-                                        right_z,
-                                        forward_x,
-                                        forward_z,
-                                        end_ry);
+                            DiceOrientation orientation = OrientationFromBlock(blk);
+                            ApplyWorldRotation90(&orientation, raidbuilder::AxisId::Y, dir);
+                            voxel::VoxelRenderer::Block temp = blk;
+                            ApplyOrientationToBlock(orientation, &temp);
+                            end_rx = temp.rot_x_deg;
+                            end_ry = temp.rot_y_deg;
+                            end_rz = temp.rot_z_deg;
                             rotated = true;
                         }
 
-                        if (!handled_by_mapping && (edge_up || edge_down)) {
-                            // Camera-relative roll for all blocks (including dice):
+                        if (edge_up || edge_down) {
+                            // Camera-relative roll for all blocks:
                             // Up = tip top face away from camera (opposite forward).
                             // Down = tip top face toward camera (forward).
                             const float abs_fwd_x = std::fabs(forward_x);
@@ -3551,11 +2718,6 @@ int main(int, char**) {
                             end_rx = temp.rot_x_deg;
                             end_ry = temp.rot_y_deg;
                             end_rz = temp.rot_z_deg;
-                            const float delta = (float)(dir * 90);
-                            std::printf("[roll] key=%s axis=%c delta=%.1f camera-relative world-rot\n",
-                                        KeyName(edge_up ? 0 : 1),
-                                        (axis == raidbuilder::AxisId::X) ? 'X' : 'Z',
-                                        delta);
                             rotated = true;
                         }
                         arrow_was_down[0] = down_left;
@@ -3797,7 +2959,6 @@ int main(int, char**) {
             if (ImGui::Button("Save")) {
                 if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                     saved_state.last_file_path = current_dungeon_path;
-                    SyncRollMapToState(roll_map, &saved_state);
                     SaveAppState(state_path, saved_state);
                     dirty = false;
                     UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
@@ -4074,12 +3235,10 @@ int main(int, char**) {
         InspectorContext inspector_context;
         inspector_context.blocks = &dungeon_blocks;
         inspector_context.selected_flags = &selected_flags;
-        inspector_context.roll_map = &roll_map;
         inspector_context.block_size = block_size;
         inspector_context.dirty = &dirty;
         inspector_context.base_window_title = &base_window_title;
         inspector_context.current_dungeon_path = &current_dungeon_path;
-        inspector_context.state_path = &state_path;
         inspector_context.window = window;
         inspector_context.close_dialog_active = &close_dialog_active;
         inspector_context.edit_mode = &edit_mode;
@@ -4101,8 +3260,6 @@ int main(int, char**) {
                 hover_has_ground = false;
                 hover_block_index = -1;
             }
-        } else {
-            ui_document.render(viewport, font_15, &play_clicked);
         }
 
         if (edit_mode) {
