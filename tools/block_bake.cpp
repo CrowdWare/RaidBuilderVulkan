@@ -17,7 +17,32 @@
 struct Vertex {
     float x, y, z;
     float r, g, b, a;
+    float u, v;
 };
+
+enum FaceAxis {
+    FacePosX,
+    FaceNegX,
+    FacePosY,
+    FaceNegY,
+    FacePosZ,
+    FaceNegZ
+};
+
+static void ComputeUV(FaceAxis axis, const float pos[3], float* out_u, float* out_v) {
+    float u = 0.0f;
+    float v = 0.0f;
+    switch (axis) {
+        case FacePosX: u = 1.0f - pos[2]; v = pos[1]; break;
+        case FaceNegX: u = pos[2];        v = pos[1]; break;
+        case FacePosY: u = pos[0];        v = 1.0f - pos[2]; break;
+        case FaceNegY: u = pos[0];        v = pos[2]; break;
+        case FacePosZ: u = pos[0];        v = pos[1]; break;
+        case FaceNegZ: u = 1.0f - pos[0]; v = pos[1]; break;
+    }
+    *out_u = u;
+    *out_v = v;
+}
 
 static char GetVoxelChar(const BlockDef& block, int x, int y, int z) {
     if (x < 0 || y < 0 || z < 0)
@@ -45,25 +70,31 @@ static BlockColor GetVoxelColor(const BlockDef& block, int x, int y, int z) {
 
 static void AddFace(std::vector<Vertex>& vertices,
                     std::vector<uint32_t>& indices,
+                    FaceAxis axis,
                     const BlockColor& color,
                     const float v0[3],
                     const float v1[3],
                     const float v2[3],
                     const float v3[3]) {
     uint32_t base = (uint32_t)vertices.size();
+    float uv0[2], uv1[2], uv2[2], uv3[2];
+    ComputeUV(axis, v0, &uv0[0], &uv0[1]);
+    ComputeUV(axis, v1, &uv1[0], &uv1[1]);
+    ComputeUV(axis, v2, &uv2[0], &uv2[1]);
+    ComputeUV(axis, v3, &uv3[0], &uv3[1]);
     Vertex verts[4] = {
-        {v0[0], v0[1], v0[2], color.r, color.g, color.b, color.a},
-        {v1[0], v1[1], v1[2], color.r, color.g, color.b, color.a},
-        {v2[0], v2[1], v2[2], color.r, color.g, color.b, color.a},
-        {v3[0], v3[1], v3[2], color.r, color.g, color.b, color.a},
+        {v0[0], v0[1], v0[2], color.r, color.g, color.b, color.a, uv0[0], uv0[1]},
+        {v1[0], v1[1], v1[2], color.r, color.g, color.b, color.a, uv1[0], uv1[1]},
+        {v2[0], v2[1], v2[2], color.r, color.g, color.b, color.a, uv2[0], uv2[1]},
+        {v3[0], v3[1], v3[2], color.r, color.g, color.b, color.a, uv3[0], uv3[1]},
     };
     vertices.insert(vertices.end(), verts, verts + 4);
     indices.push_back(base + 0);
+    indices.push_back(base + 2);
     indices.push_back(base + 1);
-    indices.push_back(base + 2);
     indices.push_back(base + 0);
-    indices.push_back(base + 2);
     indices.push_back(base + 3);
+    indices.push_back(base + 2);
 }
 
 static void BuildMesh(const BlockDef& block,
@@ -106,42 +137,42 @@ static void BuildMesh(const BlockDef& block,
                     float v1[3] = {x1, y1, z0};
                     float v2[3] = {x1, y1, z1};
                     float v3[3] = {x1, y0, z1};
-                    AddFace(out_vertices, out_indices, color, v0, v1, v2, v3);
+                    AddFace(out_vertices, out_indices, FacePosX, color, v0, v1, v2, v3);
                 }
                 if (empty_xn) {
                     float v0[3] = {x0, y0, z1};
                     float v1[3] = {x0, y1, z1};
                     float v2[3] = {x0, y1, z0};
                     float v3[3] = {x0, y0, z0};
-                    AddFace(out_vertices, out_indices, color, v0, v1, v2, v3);
+                    AddFace(out_vertices, out_indices, FaceNegX, color, v0, v1, v2, v3);
                 }
                 if (empty_yp) {
                     float v0[3] = {x0, y1, z0};
                     float v1[3] = {x0, y1, z1};
                     float v2[3] = {x1, y1, z1};
                     float v3[3] = {x1, y1, z0};
-                    AddFace(out_vertices, out_indices, color, v0, v1, v2, v3);
+                    AddFace(out_vertices, out_indices, FacePosY, color, v0, v1, v2, v3);
                 }
                 if (empty_yn) {
                     float v0[3] = {x0, y0, z1};
                     float v1[3] = {x0, y0, z0};
                     float v2[3] = {x1, y0, z0};
                     float v3[3] = {x1, y0, z1};
-                    AddFace(out_vertices, out_indices, color, v0, v1, v2, v3);
+                    AddFace(out_vertices, out_indices, FaceNegY, color, v0, v1, v2, v3);
                 }
                 if (empty_zp) {
                     float v0[3] = {x1, y0, z1};
                     float v1[3] = {x1, y1, z1};
                     float v2[3] = {x0, y1, z1};
                     float v3[3] = {x0, y0, z1};
-                    AddFace(out_vertices, out_indices, color, v0, v1, v2, v3);
+                    AddFace(out_vertices, out_indices, FacePosZ, color, v0, v1, v2, v3);
                 }
                 if (empty_zn) {
                     float v0[3] = {x0, y0, z0};
                     float v1[3] = {x0, y1, z0};
                     float v2[3] = {x1, y1, z0};
                     float v3[3] = {x1, y0, z0};
-                    AddFace(out_vertices, out_indices, color, v0, v1, v2, v3);
+                    AddFace(out_vertices, out_indices, FaceNegZ, color, v0, v1, v2, v3);
                 }
             }
         }
@@ -166,8 +197,10 @@ static bool WriteGlb(const std::string& path,
 
     std::vector<float> positions;
     std::vector<float> colors;
+    std::vector<float> uvs;
     positions.reserve(vertices.size() * 3);
     colors.reserve(vertices.size() * 4);
+    uvs.reserve(vertices.size() * 2);
     for (size_t i = 0; i < vertices.size(); ++i) {
         positions.push_back(vertices[i].x);
         positions.push_back(vertices[i].y);
@@ -176,6 +209,8 @@ static bool WriteGlb(const std::string& path,
         colors.push_back(vertices[i].g);
         colors.push_back(vertices[i].b);
         colors.push_back(vertices[i].a);
+        uvs.push_back(vertices[i].u);
+        uvs.push_back(vertices[i].v);
     }
 
     std::vector<uint8_t> bin;
@@ -185,12 +220,16 @@ static bool WriteGlb(const std::string& path,
     size_t col_offset = bin.size();
     AppendBytes(bin, colors.data(), colors.size() * sizeof(float));
     PadTo4(bin, 0);
+    size_t uv_offset = bin.size();
+    AppendBytes(bin, uvs.data(), uvs.size() * sizeof(float));
+    PadTo4(bin, 0);
     size_t idx_offset = bin.size();
     AppendBytes(bin, indices.data(), indices.size() * sizeof(uint32_t));
     PadTo4(bin, 0);
 
     size_t pos_len = positions.size() * sizeof(float);
     size_t col_len = colors.size() * sizeof(float);
+    size_t uv_len = uvs.size() * sizeof(float);
     size_t idx_len = indices.size() * sizeof(uint32_t);
 
     std::ostringstream json;
@@ -200,6 +239,7 @@ static bool WriteGlb(const std::string& path,
     json << "\"bufferViews\":[";
     json << "{\"buffer\":0,\"byteOffset\":" << pos_offset << ",\"byteLength\":" << pos_len << ",\"target\":34962},";
     json << "{\"buffer\":0,\"byteOffset\":" << col_offset << ",\"byteLength\":" << col_len << ",\"target\":34962},";
+    json << "{\"buffer\":0,\"byteOffset\":" << uv_offset << ",\"byteLength\":" << uv_len << ",\"target\":34962},";
     json << "{\"buffer\":0,\"byteOffset\":" << idx_offset << ",\"byteLength\":" << idx_len << ",\"target\":34963}";
     json << "],";
     json << "\"accessors\":[";
@@ -207,10 +247,12 @@ static bool WriteGlb(const std::string& path,
          << ",\"type\":\"VEC3\"},";
     json << "{\"bufferView\":1,\"componentType\":5126,\"count\":" << vertices.size()
          << ",\"type\":\"VEC4\"},";
-    json << "{\"bufferView\":2,\"componentType\":5125,\"count\":" << indices.size()
+    json << "{\"bufferView\":2,\"componentType\":5126,\"count\":" << vertices.size()
+         << ",\"type\":\"VEC2\"},";
+    json << "{\"bufferView\":3,\"componentType\":5125,\"count\":" << indices.size()
          << ",\"type\":\"SCALAR\"}";
     json << "],";
-    json << "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"COLOR_0\":1},\"indices\":2,\"mode\":4}]}],";
+    json << "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"COLOR_0\":1,\"TEXCOORD_0\":2},\"indices\":3,\"mode\":4}]}],";
     json << "\"nodes\":[{\"mesh\":0}],";
     json << "\"scenes\":[{\"nodes\":[0]}],";
     json << "\"scene\":0";

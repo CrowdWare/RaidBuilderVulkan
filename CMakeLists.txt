@@ -4,6 +4,7 @@ project(RaidBuilder LANGUAGES CXX)
 add_executable(RaidBuilder
     src/main.cpp
     src/block_sml.cpp
+    src/gltf_loader.cpp
 )
 
 if(APPLE)
@@ -20,6 +21,7 @@ target_compile_features(RaidBuilder PUBLIC cxx_std_11)
 target_include_directories(RaidBuilder PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinygltf/tinygltf-2.9.7
 )
 
 set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

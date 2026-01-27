@@ -40,6 +40,12 @@
 #if defined(_WIN32)
 #include <direct.h>
 #endif
+#include "gltf_loader.h"
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <unistd.h>
+#include <limits.h>
+#endif
 
 #define PI_F 3.1415926f
 
@@ -299,6 +305,23 @@ static std::string GetHistoryDir() {
 #endif
 }
 
+static std::string GetStateDir() {
+#if defined(__APPLE__)
+    return GetUserHomeDir() + "/Library/Application Support/RaidBuilder";
+#elif defined(_WIN32)
+    return GetUserHomeDir() + "/AppData/Roaming/RaidBuilder";
+#else
+    return GetUserHomeDir() + "/.local/share/raidbuilder";
+#endif
+}
+
+static std::string GetParentDir(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos)
+        return ".";
+    return path.substr(0, slash);
+}
+
 static std::string GetFileBaseName(const std::string& path) {
     size_t slash = path.find_last_of("/\\");
     std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
@@ -364,7 +387,7 @@ static std::string GetStatePath(const std::string& persist) {
         return "RaidBuilder/state_project.cfg";
     if (persist == "session")
         return "/tmp/raidbuilder_state.cfg";
-    return "RaidBuilder/state_user.cfg";
+    return GetStateDir() + "/state_user.cfg";
 }
 
 static bool ParseHexColor(const std::string& text, ImVec4* out) {
@@ -446,6 +469,7 @@ static std::string ResolveThemePath(const std::string& theme_name) {
 }
 
 static bool LoadAppState(const std::string& path, AppState* out_state) {
+    EnsureDir(GetParentDir(path));
     std::ifstream file(path.c_str());
     if (!file.is_open())
         return false;
@@ -474,6 +498,7 @@ static bool LoadAppState(const std::string& path, AppState* out_state) {
 }
 
 static void SaveAppState(const std::string& path, const AppState& state) {
+    EnsureDir(GetParentDir(path));
     std::ofstream file(path.c_str(), std::ios::trunc);
     if (!file.is_open())
         return;
@@ -490,7 +515,23 @@ struct TileDef {
     std::string key;
     std::string texture;
     std::string model;
+    std::string type = "block"; // block | prop
+    int height_cm = 60;
+    int scale_percent = 100;
+    int height_blocks = 1;
 };
+
+static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
+    if (height_cm <= 0)
+        height_cm = block_cm;
+    if (scale_percent <= 0)
+        scale_percent = 100;
+    int eff_cm = height_cm * scale_percent;
+    int denom = block_cm * 100;
+    if (denom <= 0)
+        denom = 1;
+    return (eff_cm + denom - 1) / denom;
+}
 
 static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block>& blocks,
                                    float block_size,
@@ -508,12 +549,34 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
 
     std::map<int, std::map<std::pair<int, int>, std::string> > layers;
     std::map<int, Bounds> bounds;
+    Bounds global_bounds;
 
     for (size_t i = 0; i < blocks.size(); ++i) {
         int gx = (int)std::round(blocks[i].x / block_size);
         int gz = (int)std::round(blocks[i].z / block_size);
         int layer = (int)std::round(blocks[i].y / block_size - 0.5f);
         std::string key = blocks[i].key.empty() ? "s" : blocks[i].key;
+        int rot_x = (int)std::round(blocks[i].rot_x_deg / 90.0f);
+        int rot_y = (int)std::round(blocks[i].rot_y_deg / 90.0f);
+        int rot_z = (int)std::round(blocks[i].rot_z_deg / 90.0f);
+        rot_x = ((rot_x % 4) + 4) % 4;
+        rot_y = ((rot_y % 4) + 4) % 4;
+        rot_z = ((rot_z % 4) + 4) % 4;
+        std::vector<std::string> rot_parts;
+        if (rot_x != 0)
+            rot_parts.push_back("x" + std::to_string(rot_x));
+        if (rot_y != 0)
+            rot_parts.push_back("y" + std::to_string(rot_y));
+        if (rot_z != 0)
+            rot_parts.push_back("z" + std::to_string(rot_z));
+        if (!rot_parts.empty()) {
+            key += ":";
+            for (size_t ri = 0; ri < rot_parts.size(); ++ri) {
+                key += rot_parts[ri];
+                if (ri + 1 < rot_parts.size())
+                    key += ",";
+            }
+        }
         layers[layer][std::make_pair(gx, gz)] = key;
         Bounds& b = bounds[layer];
         if (!b.has) {
@@ -526,6 +589,16 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
             b.min_z = std::min(b.min_z, gz);
             b.max_z = std::max(b.max_z, gz);
         }
+        if (!global_bounds.has) {
+            global_bounds.has = true;
+            global_bounds.min_x = global_bounds.max_x = gx;
+            global_bounds.min_z = global_bounds.max_z = gz;
+        } else {
+            global_bounds.min_x = std::min(global_bounds.min_x, gx);
+            global_bounds.max_x = std::max(global_bounds.max_x, gx);
+            global_bounds.min_z = std::min(global_bounds.min_z, gz);
+            global_bounds.max_z = std::max(global_bounds.max_z, gz);
+        }
     }
 
     std::ostringstream out;
@@ -534,14 +607,13 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
     out << "        lines: \"\n";
     for (std::map<int, std::map<std::pair<int, int>, std::string> >::const_iterator it = layers.begin(); it != layers.end(); ++it) {
         int layer = it->first;
-        Bounds b = bounds[layer];
         out << "#" << layer << "\n";
-        for (int z = b.min_z; z <= b.max_z; ++z) {
-            for (int x = b.min_x; x <= b.max_x; ++x) {
+        for (int z = global_bounds.min_z; z <= global_bounds.max_z; ++z) {
+            for (int x = global_bounds.min_x; x <= global_bounds.max_x; ++x) {
                 std::map<std::pair<int, int>, std::string>::const_iterator cell = it->second.find(std::make_pair(x, z));
                 const std::string value = (cell != it->second.end()) ? cell->second : ".";
                 out << value;
-                if (x < b.max_x)
+                if (x < global_bounds.max_x)
                     out << " ";
             }
             out << "\n";
@@ -553,8 +625,17 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
         out << "    Tiles {\n";
         for (size_t i = 0; i < tiles.size(); ++i) {
             const std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
-            out << "        Tile { key: \"" << tiles[i].key << "\" texture: \"" << tiles[i].texture
-                << "\" model: \"" << model << "\" }\n";
+            out << "        Tile { key: \"" << tiles[i].key << "\"";
+            if (!tiles[i].texture.empty())
+                out << " texture: \"" << tiles[i].texture << "\"";
+            out << " model: \"" << model << "\"";
+            if (tiles[i].type != "block")
+                out << " type: \"" << tiles[i].type << "\"";
+            if (tiles[i].height_cm != 60)
+                out << " height_cm: " << tiles[i].height_cm;
+            if (tiles[i].scale_percent != 100)
+                out << " scale_percent: " << tiles[i].scale_percent;
+            out << " }\n";
         }
         out << "    }\n\n";
     }
@@ -598,6 +679,145 @@ static std::string ResolveAssetPath(const std::string& path, const char* prefix)
     return prefix_str + path;
 }
 
+static std::string GetExecutableDir() {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(&buf[0], &size) != 0)
+        return ".";
+    buf.resize(std::strlen(buf.c_str()));
+    char real_path[PATH_MAX];
+    if (realpath(buf.c_str(), real_path))
+        buf = real_path;
+    size_t slash = buf.find_last_of('/');
+    if (slash == std::string::npos)
+        return ".";
+    return buf.substr(0, slash);
+#else
+    return ".";
+#endif
+}
+
+static std::string ResolveRepoPath(const std::string& rel) {
+    std::string exe_dir = GetExecutableDir();
+    std::string dir = exe_dir;
+    for (int i = 0; i < 6; ++i) {
+        std::string candidate = dir + "/RaidBuilder/" + rel;
+        if (FileExists(candidate))
+            return candidate;
+        size_t slash = dir.find_last_of('/');
+        if (slash == std::string::npos)
+            break;
+        dir = dir.substr(0, slash);
+    }
+    return "RaidBuilder/" + rel;
+}
+
+static std::string ResolveWorkspacePath(const std::string& rel) {
+    std::string exe_dir = GetExecutableDir();
+    std::string dir = exe_dir;
+    for (int i = 0; i < 6; ++i) {
+        std::string candidate = dir + "/" + rel;
+        if (FileExists(candidate))
+            return candidate;
+        size_t slash = dir.find_last_of('/');
+        if (slash == std::string::npos)
+            break;
+        dir = dir.substr(0, slash);
+    }
+    return rel;
+}
+
+static std::string ResolveModelPath(const std::string& path) {
+    if (path.empty())
+        return path;
+    if (path[0] == '/' || path[0] == '.')
+        return path;
+    if (path.find('/') != std::string::npos || path.find('\\') != std::string::npos)
+        return path;
+    std::string candidate = ResolveWorkspacePath(std::string("build/blocks_cache/") + path);
+    if (FileExists(candidate))
+        return candidate;
+    candidate = ResolveRepoPath(std::string("assets/blocks/") + path);
+    if (FileExists(candidate))
+        return candidate;
+    return path;
+}
+
+static bool ParseRotationSuffix(const std::string& suffix,
+                                voxel::VoxelRenderer::Block* block,
+                                std::string* error_message) {
+    if (!block)
+        return false;
+    if (suffix.empty())
+        return true;
+
+    auto set_quarter_turns = [&](char axis, int turns) {
+        int norm = ((turns % 4) + 4) % 4;
+        float deg = (float)(norm * 90);
+        if (axis == 'x' || axis == 'X')
+            block->rot_x_deg = deg;
+        else if (axis == 'y' || axis == 'Y')
+            block->rot_y_deg = deg;
+        else if (axis == 'z' || axis == 'Z')
+            block->rot_z_deg = deg;
+    };
+
+    auto parse_axis_value = [&](char axis, const std::string& value_text) -> bool {
+        if (value_text.empty()) {
+            if (error_message)
+                *error_message = std::string("Missing rotation value for axis '") + axis + "'";
+            return false;
+        }
+        for (size_t i = 0; i < value_text.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(value_text[i]))) {
+                if (error_message)
+                    *error_message = std::string("Invalid rotation value '") + value_text + "'";
+                return false;
+            }
+        }
+        int value = std::atoi(value_text.c_str());
+        if (value >= 0 && value <= 3) {
+            set_quarter_turns(axis, value);
+            return true;
+        }
+        if (value == 0 || value == 90 || value == 180 || value == 270) {
+            set_quarter_turns(axis, value / 90);
+            return true;
+        }
+        if (error_message)
+            *error_message = std::string("Rotation must be 0..3 or 0/90/180/270, got '") + value_text + "'";
+        return false;
+    };
+
+    // Allow both comma-separated (x1,y3) and compact (x1y3z0).
+    std::string expanded = suffix;
+    for (size_t i = 0; i < expanded.size(); ++i) {
+        char c = expanded[i];
+        if ((c == 'x' || c == 'X' || c == 'y' || c == 'Y' || c == 'z' || c == 'Z') && i > 0 && expanded[i - 1] != ',')
+            expanded.insert(i++, ",");
+    }
+
+    std::istringstream rot_stream(expanded);
+    std::string part;
+    while (std::getline(rot_stream, part, ',')) {
+        if (part.empty())
+            continue;
+        char axis = part[0];
+        if (axis != 'x' && axis != 'X' && axis != 'y' && axis != 'Y' && axis != 'z' && axis != 'Z') {
+            if (error_message)
+                *error_message = std::string("Unknown rotation axis in '") + part + "'";
+            return false;
+        }
+        std::string value_text = part.substr(1);
+        if (!parse_axis_value(axis, value_text))
+            return false;
+    }
+
+    return true;
+}
+
 static bool ParseDungeon(const std::string& text,
                          float block_size,
                          std::vector<voxel::VoxelRenderer::Block>* out_blocks,
@@ -622,11 +842,19 @@ static bool ParseDungeon(const std::string& text,
                 tile.texture = value.string_value;
             if (stack.back() == "Tile" && name == "model" && value.type == sml::PropertyValue::String)
                 tile.model = value.string_value;
+            if (stack.back() == "Tile" && name == "type" && value.type == sml::PropertyValue::String)
+                tile.type = value.string_value;
+            if (stack.back() == "Tile" && name == "height_cm" && value.type == sml::PropertyValue::Int)
+                tile.height_cm = value.int_value;
+            if (stack.back() == "Tile" && name == "scale_percent" && value.type == sml::PropertyValue::Int)
+                tile.scale_percent = value.int_value;
         }
         void endElement(const std::string& name) override {
             if (name == "Tile") {
-                if (!tile.key.empty() && !tile.texture.empty())
+                if (!tile.key.empty()) {
+                    tile.height_blocks = ComputeHeightBlocks(tile.height_cm, tile.scale_percent, 60);
                     tiles.push_back(tile);
+                }
                 tile = TileDef();
             }
             if (!stack.empty())
@@ -658,7 +886,9 @@ static bool ParseDungeon(const std::string& text,
     int current_layer = 0;
     int max_cols = 0;
     int max_rows = 0;
-    std::vector<int> row_counts(1, 0);
+
+    std::vector<std::vector<std::vector<std::string> > > layer_rows;
+    layer_rows.resize(1);
 
     std::map<std::string, int> tex_index_map;
     if (!handler.tiles.empty()) {
@@ -671,35 +901,58 @@ static bool ParseDungeon(const std::string& text,
             continue;
         if (line.size() > 1 && line[0] == '#') {
             current_layer = std::atoi(line.c_str() + 1);
-            if ((int)row_counts.size() <= current_layer)
-                row_counts.resize(current_layer + 1, 0);
+            if ((int)layer_rows.size() <= current_layer)
+                layer_rows.resize(current_layer + 1);
             continue;
         }
 
         std::istringstream row_stream(line);
+        std::vector<std::string> tokens;
         std::string token;
-        int col = 0;
-        while (row_stream >> token) {
-            std::string id = token;
-            size_t colon = id.find(':');
-            if (colon != std::string::npos)
-                id = id.substr(0, colon);
-            if (!handler.tiles.empty() && tex_index_map.find(id) == tex_index_map.end())
-                continue;
-            if (id != ".") {
-                voxel::VoxelRenderer::Block block;
-                block.x = (float)col;
-                block.y = (float)current_layer;
-                block.z = (float)row_counts[current_layer];
-                block.key = id;
-                block.tex_index = tex_index_map.empty() ? 0 : tex_index_map[id];
-                blocks.push_back(block);
-            }
-            col++;
+        while (row_stream >> token)
+            tokens.push_back(token);
+        if (!tokens.empty()) {
+            if ((int)tokens.size() > max_cols)
+                max_cols = (int)tokens.size();
+            layer_rows[current_layer].push_back(tokens);
         }
-        if (col > max_cols)
-            max_cols = col;
-        row_counts[current_layer] += 1;
+    }
+
+    std::vector<int> row_counts(layer_rows.size(), 0);
+    for (size_t layer = 0; layer < layer_rows.size(); ++layer) {
+        const std::vector<std::vector<std::string> >& rows = layer_rows[layer];
+        for (size_t r = 0; r < rows.size(); ++r) {
+            const std::vector<std::string>& tokens = rows[r];
+            for (int col = 0; col < max_cols; ++col) {
+                std::string raw = (col < (int)tokens.size()) ? tokens[col] : ".";
+                std::string id = raw;
+                std::string suffix;
+                size_t colon = raw.find(':');
+                if (colon != std::string::npos) {
+                    id = raw.substr(0, colon);
+                    suffix = raw.substr(colon + 1);
+                }
+                if (!handler.tiles.empty() && tex_index_map.find(id) == tex_index_map.end())
+                    continue;
+                if (id != ".") {
+                    voxel::VoxelRenderer::Block block;
+                    block.x = (float)col;
+                    block.y = (float)layer;
+                    block.z = (float)row_counts[layer];
+                    block.key = id;
+                    if (!suffix.empty()) {
+                        if (!ParseRotationSuffix(suffix, &block, error_message)) {
+                            if (error_message && error_message->empty())
+                                *error_message = std::string("Invalid rotation suffix '") + suffix + "'";
+                            return false;
+                        }
+                    }
+                    block.tex_index = tex_index_map.empty() ? 0 : tex_index_map[id];
+                    blocks.push_back(block);
+                }
+            }
+            row_counts[layer] += 1;
+        }
     }
 
     for (size_t i = 0; i < row_counts.size(); ++i)
@@ -1061,12 +1314,12 @@ static void FramePresent(ImGui_ImplVulkanH_Window* wd) {
 }
 
 int main(int, char**) {
-    const char* ui_path = "RaidBuilder/UI.sml";
+    std::string ui_path = ResolveRepoPath("UI.sml");
     smlui::UiDocument ui_document;
     std::string parse_error;
     std::string ui_text;
-    if (!LoadFileText(ui_path, &ui_text)) {
-        fprintf(stderr, "SML load error: could not read %s\n", ui_path);
+    if (!LoadFileText(ui_path.c_str(), &ui_text)) {
+        fprintf(stderr, "SML load error: could not read %s\n", ui_path.c_str());
     } else if (!ui_document.parseFromString(ui_text, &parse_error)) {
         fprintf(stderr, "SML parse error: %s\n", parse_error.c_str());
     }
@@ -1097,15 +1350,17 @@ int main(int, char**) {
         ui_window.size.x = saved_state.size_x;
         ui_window.size.y = saved_state.size_y;
     }
-    std::string current_dungeon_path = "RaidBuilder/dungeon.sml";
+    std::string current_dungeon_path = ResolveRepoPath("dungeon.sml");
     if (ui_window.state.last_file_path && !saved_state.last_file_path.empty() && FileExists(saved_state.last_file_path)) {
         current_dungeon_path = saved_state.last_file_path;
     }
+    fprintf(stderr, "State path: %s\n", state_path.c_str());
+    fprintf(stderr, "Dungeon path: %s\n", current_dungeon_path.c_str());
     const float block_size = 0.6f;
     std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
     std::vector<unsigned char> selected_flags;
     std::vector<TileDef> tiles;
-    std::string default_texture_path = "RaidBuilder/assets/textures/raid_stone.png";
+    std::string default_texture_path = "assets/textures/raid_stone.png";
     std::string dungeon_text;
     std::string dungeon_error;
     if (!LoadFileText(current_dungeon_path.c_str(), &dungeon_text)) {
@@ -1118,15 +1373,66 @@ int main(int, char**) {
         tile.key = "s";
         tile.texture = default_texture_path;
         tile.model = "block.glb";
+        tile.type = "block";
+        tile.height_cm = 60;
+        tile.scale_percent = 100;
+        tile.height_blocks = 1;
         tiles.push_back(tile);
     }
 
     std::vector<std::string> block_texture_paths;
     block_texture_paths.reserve(tiles.size());
-    for (size_t i = 0; i < tiles.size(); ++i)
-        block_texture_paths.push_back(ResolveAssetPath(tiles[i].texture, "RaidBuilder/"));
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        std::string tex = tiles[i].texture.empty() ? default_texture_path : tiles[i].texture;
+        std::string resolved = ResolveRepoPath(tex);
+        if (!FileExists(resolved)) {
+            std::string fallback = ResolveRepoPath(default_texture_path);
+            fprintf(stderr, "Missing tile texture: %s (tile '%s'), using %s\n",
+                    resolved.c_str(), tiles[i].key.c_str(), fallback.c_str());
+            resolved = fallback;
+        }
+        block_texture_paths.push_back(resolved);
+    }
+
+    std::vector<voxel::VoxelRenderer::MeshData> tile_meshes;
+    std::vector<bool> tile_mesh_has_uv;
+    tile_meshes.reserve(tiles.size());
+    tile_mesh_has_uv.reserve(tiles.size());
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
+        std::string model_path = ResolveModelPath(model);
+        GltfMesh mesh;
+        std::string mesh_error;
+        if (LoadGltfMesh(model_path, &mesh, &mesh_error)) {
+            tile_meshes.push_back(mesh.mesh);
+            tile_mesh_has_uv.push_back(mesh.has_uv);
+        } else {
+            if (!mesh_error.empty())
+                fprintf(stderr, "Failed to load model %s: %s\n", model_path.c_str(), mesh_error.c_str());
+            else
+                fprintf(stderr, "Failed to load model %s\n", model_path.c_str());
+            tile_meshes.push_back(voxel::VoxelRenderer::MeshData());
+            tile_mesh_has_uv.push_back(false);
+        }
+    }
+
+    auto tile_tex_index_for = [&](size_t index) -> int {
+        if (index >= tiles.size())
+            return -2;
+        if (tiles[index].texture.empty() || !tile_mesh_has_uv[index])
+            return -2;
+        return (int)index;
+    };
+
+    for (size_t i = 0; i < dungeon_blocks.size(); ++i) {
+        int idx = dungeon_blocks[i].tex_index;
+        dungeon_blocks[i].mesh_index = idx;
+        dungeon_blocks[i].tex_index = tile_tex_index_for(idx);
+    }
+
     const std::string active_tile_key = tiles.front().key;
-    const int active_tex_index = 0;
+    const int active_mesh_index = 0;
+    const int active_tex_index = tile_tex_index_for(0);
     selected_flags.assign(dungeon_blocks.size(), 0);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     std::string base_window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title;
@@ -1156,15 +1462,33 @@ int main(int, char**) {
     ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
     SetupVulkanWindow(wd, surface, w, h);
 
+    std::string shader_world_vert = ResolveRepoPath("shaders/world.vert.spv");
+    std::string shader_world_frag = ResolveRepoPath("shaders/world.frag.spv");
+    std::string shader_pick_vert = ResolveRepoPath("shaders/pick.vert.spv");
+    std::string shader_pick_frag = ResolveRepoPath("shaders/pick.frag.spv");
+    std::string ground_texture = ResolveRepoPath("assets/textures/raid_ground.png");
+
+    if (!FileExists(shader_world_vert))
+        fprintf(stderr, "Missing shader: %s\n", shader_world_vert.c_str());
+    if (!FileExists(shader_world_frag))
+        fprintf(stderr, "Missing shader: %s\n", shader_world_frag.c_str());
+    if (!FileExists(shader_pick_vert))
+        fprintf(stderr, "Missing shader: %s\n", shader_pick_vert.c_str());
+    if (!FileExists(shader_pick_frag))
+        fprintf(stderr, "Missing shader: %s\n", shader_pick_frag.c_str());
+    if (!FileExists(ground_texture))
+        fprintf(stderr, "Missing ground texture: %s\n", ground_texture.c_str());
+
     if (!g_VoxelRenderer.init(g_Device, g_PhysicalDevice, g_Queue, g_QueueFamily, wd->RenderPass,
-                              "RaidBuilder/shaders/world.vert.spv",
-                              "RaidBuilder/shaders/world.frag.spv",
-                              "RaidBuilder/shaders/pick.vert.spv",
-                              "RaidBuilder/shaders/pick.frag.spv",
-                              "RaidBuilder/assets/textures/raid_ground.png",
+                              shader_world_vert.c_str(),
+                              shader_world_frag.c_str(),
+                              shader_pick_vert.c_str(),
+                              shader_pick_frag.c_str(),
+                              ground_texture.c_str(),
                               block_texture_paths)) {
         fprintf(stderr, "VoxelRenderer init failed (missing shaders?)\n");
     }
+    g_VoxelRenderer.setBlockMeshes(tile_meshes);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     g_VoxelRenderer.setSelection(selected_flags);
     g_VoxelRenderer.resizePickResources((uint32_t)w, (uint32_t)h);
@@ -1597,6 +1921,7 @@ int main(int, char**) {
                                 new_block.z = place_z;
                                 new_block.tex_index = active_tex_index;
                                 new_block.key = active_tile_key;
+                                new_block.mesh_index = active_mesh_index;
                                 dungeon_blocks.push_back(new_block);
                                 selected_flags.assign(dungeon_blocks.size(), 0);
                                 selected_flags.back() = 1;
@@ -1647,6 +1972,7 @@ int main(int, char**) {
                             new_block.z = free_z;
                             new_block.tex_index = active_tex_index;
                             new_block.key = active_tile_key;
+                            new_block.mesh_index = active_mesh_index;
                             dungeon_blocks.push_back(new_block);
                             selected_flags.assign(dungeon_blocks.size(), 0);
                             selected_flags.back() = 1;
@@ -1694,6 +2020,7 @@ int main(int, char**) {
                     new_block.z = free_z;
                     new_block.tex_index = active_tex_index;
                     new_block.key = active_tile_key;
+                    new_block.mesh_index = active_mesh_index;
                     dungeon_blocks.push_back(new_block);
                     selected_flags.assign(dungeon_blocks.size(), 0);
                     selected_flags.back() = 1;

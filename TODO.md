@@ -6,7 +6,5 @@
     MenuItem { label:"Exit" onClick: requestClose }
     requestClose ist hier ein enum und verweist auf sms 
     fun requestClose() {}
-- Textur for stone block
 - Action bar and inventory for blocks
-- Blocks kochen
 - Tiles folder
