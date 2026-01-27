@@ -1,7 +1,5 @@
 Block {
   id: "block"
-  size: 6
-  layers: 6
   collision: full
   lines: "
 #0

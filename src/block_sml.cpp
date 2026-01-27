@@ -12,6 +12,7 @@
 #include <sstream>
 #include <cctype>
 #include <cstdlib>
+#include <cstdio>
 
 static bool LoadTextFile(const std::string& path, std::string* out_text) {
     std::ifstream file(path.c_str());
@@ -87,15 +88,20 @@ bool LoadBlockSml(const std::string& path, BlockDef* out_block, std::string* err
                     block.size = value.int_value;
                 else if (name == "layers" && value.type == sml::PropertyValue::Int)
                     block.layers = value.int_value;
-                else if (name == "collision" && value.type == sml::PropertyValue::String)
+                else if (name == "collision" &&
+                         (value.type == sml::PropertyValue::String || value.type == sml::PropertyValue::EnumType))
                     block.collision = value.string_value;
                 else if (name == "lines" && value.type == sml::PropertyValue::String)
                     lines = value.string_value;
+                else
+                    std::fprintf(stderr, "Block SML warning: Unknown Block property '%s'\n", name.c_str());
             } else if (elem == "Color") {
                 if (name == "id" && value.type == sml::PropertyValue::String)
                     color_id = value.string_value;
                 else if (name == "color" && value.type == sml::PropertyValue::String)
                     color_value = value.string_value;
+                else
+                    std::fprintf(stderr, "Block SML warning: Unknown Color property '%s'\n", name.c_str());
             }
         }
         void endElement(const std::string& name) override {
@@ -128,8 +134,16 @@ bool LoadBlockSml(const std::string& path, BlockDef* out_block, std::string* err
 
     if (handler.block.size <= 0)
         handler.block.size = 6;
+    if (handler.block.size != 6) {
+        std::fprintf(stderr, "Block SML warning: size=%d is unsupported, forcing 6\n", handler.block.size);
+        handler.block.size = 6;
+    }
     if (handler.block.layers <= 0)
         handler.block.layers = 6;
+    if (handler.block.layers != 6) {
+        std::fprintf(stderr, "Block SML warning: layers=%d is unsupported, forcing 6\n", handler.block.layers);
+        handler.block.layers = 6;
+    }
 
     // Parse lines into layer rows.
     std::istringstream iss(handler.lines);

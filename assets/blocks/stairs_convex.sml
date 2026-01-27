@@ -1,7 +1,5 @@
 Block {
   id: "stairs_convex"
-  size: 6
-  layers: 6
   collision: ramp
   lines: "
 #0

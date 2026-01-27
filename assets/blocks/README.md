@@ -7,8 +7,6 @@ Each block is a 6 x 6 x 6 sub-voxel grid by default, using vertex colors as the 
 ```
 Block {
   id: "stairs_concave"
-  size: 6
-  layers: 6
   collision: ramp
   lines: "
 #0
@@ -59,8 +57,6 @@ xxxxxx
 
 Fields:
 - `id`: unique block id.
-- `size`: sub-voxel grid width (x/z), default 6.
-- `layers`: sub-voxel grid height (y), default 6.
 - `collision`: `full | ramp | none` (runtime only, not baked into mesh).
 - `lines`: voxel layout. `#<layer>` switches layer, followed by `size` rows of `size` chars.
 

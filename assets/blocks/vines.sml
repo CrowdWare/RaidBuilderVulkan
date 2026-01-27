@@ -1,7 +1,5 @@
 Block {
   id: "vines"
-  size: 6
-  layers: 6
   collision: none
   lines: "
 #0

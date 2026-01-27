@@ -538,6 +538,63 @@ struct TileDef {
 // Forward declarations for path resolution helpers used by the tile catalog loader.
 static std::string ResolveRepoDir(const std::string& rel);
 static std::string ResolveWorkspacePath(const std::string& rel);
+static bool IsSymmetricTileModel(const std::string& model_in);
+
+static std::string GetActionBarPath() {
+    return GetStateDir() + "/actionbar.cfg";
+}
+
+static void LoadActionBar(const std::string& path,
+                          const std::map<std::string, int>& tile_index_by_key,
+                          std::vector<int>* action_slots,
+                          int* active_slot) {
+    if (!action_slots)
+        return;
+    EnsureDir(GetParentDir(path));
+    std::ifstream file(path.c_str());
+    if (!file.is_open())
+        return;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty())
+            continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        if (key == "activeSlot" && active_slot) {
+            *active_slot = std::atoi(value.c_str());
+            continue;
+        }
+        if (key.rfind("slot", 0) != 0)
+            continue;
+        int slot = std::atoi(key.c_str() + 4);
+        if (slot < 0 || slot >= (int)action_slots->size())
+            continue;
+        std::map<std::string, int>::const_iterator it = tile_index_by_key.find(value);
+        if (it != tile_index_by_key.end())
+            (*action_slots)[slot] = it->second;
+    }
+}
+
+static void SaveActionBar(const std::string& path,
+                          const std::vector<int>& action_slots,
+                          const std::vector<TileDef>& tiles,
+                          int active_slot) {
+    EnsureDir(GetParentDir(path));
+    std::ofstream file(path.c_str(), std::ios::trunc);
+    if (!file.is_open())
+        return;
+    file << "activeSlot=" << active_slot << "\n";
+    for (size_t i = 0; i < action_slots.size(); ++i) {
+        int idx = action_slots[i];
+        std::string key = "";
+        if (idx >= 0 && idx < (int)tiles.size())
+            key = tiles[idx].key;
+        file << "slot" << i << "=" << key << "\n";
+    }
+}
 
 static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
     if (height_cm <= 0)
@@ -698,6 +755,9 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
     std::map<int, std::map<std::pair<int, int>, std::string> > layers;
     std::map<int, Bounds> bounds;
     Bounds global_bounds;
+    std::map<std::string, bool> symmetric_by_key;
+    for (size_t i = 0; i < tiles.size(); ++i)
+        symmetric_by_key[tiles[i].key] = IsSymmetricTileModel(tiles[i].model);
 
     for (size_t i = 0; i < blocks.size(); ++i) {
         int gx = (int)std::round(blocks[i].x / block_size);
@@ -710,6 +770,12 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
         rot_x = ((rot_x % 4) + 4) % 4;
         rot_y = ((rot_y % 4) + 4) % 4;
         rot_z = ((rot_z % 4) + 4) % 4;
+        std::map<std::string, bool>::const_iterator sym_it = symmetric_by_key.find(key);
+        if (sym_it != symmetric_by_key.end() && sym_it->second) {
+            rot_x = 0;
+            rot_y = 0;
+            rot_z = 0;
+        }
         std::vector<std::string> rot_parts;
         if (rot_x != 0)
             rot_parts.push_back("x" + std::to_string(rot_x));
@@ -909,6 +975,27 @@ static std::string StripResPrefix(const std::string& path) {
     if (path.compare(0, prefix.size(), prefix) == 0)
         return path.substr(prefix.size());
     return path;
+}
+
+static bool EndsWith(const std::string& s, const std::string& suffix) {
+    if (suffix.size() > s.size())
+        return false;
+    return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
+}
+
+static std::string NormalizeTileModel(const std::string& model_in) {
+    std::string model = model_in;
+    if (model.empty())
+        return "block.glb";
+    if (model.compare(0, 8, "texture:") == 0)
+        return "block.glb";
+    model = StripResPrefix(model);
+    return model.empty() ? "block.glb" : model;
+}
+
+static bool IsSymmetricTileModel(const std::string& model_in) {
+    std::string model = NormalizeTileModel(model_in);
+    return model == "block.glb" || EndsWith(model, "/block.glb") || EndsWith(model, "\\block.glb");
 }
 
 static std::string ResolveModelPath(const std::string& path) {
@@ -1627,7 +1714,7 @@ int main(int, char**) {
                 tiles[i].texture = tex_from_model;
             model = "block.glb";
         }
-        model = StripResPrefix(model);
+        model = NormalizeTileModel(model);
         std::string model_path = ResolveModelPath(model);
         GltfMesh mesh;
         std::string mesh_error;
@@ -1670,6 +1757,10 @@ int main(int, char**) {
     std::map<std::string, int> tile_index_by_key;
     for (size_t i = 0; i < tiles.size(); ++i)
         tile_index_by_key[tiles[i].key] = (int)i;
+    std::vector<bool> tile_is_symmetric;
+    tile_is_symmetric.resize(tiles.size(), false);
+    for (size_t i = 0; i < tiles.size(); ++i)
+        tile_is_symmetric[i] = IsSymmetricTileModel(tiles[i].model);
     for (size_t i = 0; i < dungeon_blocks.size(); ++i) {
         int idx = 0;
         std::map<std::string, int>::const_iterator it = tile_index_by_key.find(dungeon_blocks[i].key);
@@ -1689,8 +1780,14 @@ int main(int, char**) {
     for (int i = 0; i < 10 && i < (int)tiles.size(); ++i)
         action_slots[i] = i;
     int active_slot = 0;
+    const std::string actionbar_path = GetActionBarPath();
+    bool actionbar_dirty = false;
+    LoadActionBar(actionbar_path, tile_index_by_key, &action_slots, &active_slot);
+    if (active_slot < 0 || active_slot >= (int)action_slots.size())
+        active_slot = 0;
     bool inventory_open = false;
     bool slot_was_down[10] = {false, false, false, false, false, false, false, false, false, false};
+    bool arrow_was_down[4] = {false, false, false, false};
 
     selected_flags.assign(dungeon_blocks.size(), 0);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
@@ -1920,6 +2017,7 @@ int main(int, char**) {
         }
 
         if (!close_dialog_active) {
+            int prev_active_slot = active_slot;
             bool inv_down = (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS);
             if (inv_down && !inv_was_down)
                 inventory_open = !inventory_open;
@@ -1935,6 +2033,8 @@ int main(int, char**) {
                     active_slot = i;
                 slot_was_down[i] = down;
             }
+            if (active_slot != prev_active_slot)
+                actionbar_dirty = true;
         } else {
             inv_was_down = false;
             for (int i = 0; i < 10; ++i)
@@ -2201,6 +2301,58 @@ int main(int, char**) {
                 hover_has_block = false;
                 hover_has_ground = false;
                 hover_block_index = -1;
+            }
+
+            bool controls_blocked = (inventory_open && !close_dialog_active);
+            if (hover_has_block && hover_block_index >= 0 && hover_block_index < (int)dungeon_blocks.size()) {
+                selected_flags.assign(dungeon_blocks.size(), 0);
+                selected_flags[hover_block_index] = 1;
+                g_VoxelRenderer.setSelection(selected_flags);
+
+                if (!controls_blocked) {
+                    int tile_idx = 0;
+                    std::map<std::string, int>::const_iterator it = tile_index_by_key.find(dungeon_blocks[hover_block_index].key);
+                    if (it != tile_index_by_key.end())
+                        tile_idx = it->second;
+                    bool symmetric = (tile_idx >= 0 && tile_idx < (int)tile_is_symmetric.size()) ? tile_is_symmetric[tile_idx] : false;
+                    if (!symmetric) {
+                        const int arrow_keys[4] = {GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP, GLFW_KEY_DOWN};
+                        const int dyaw[4] = {-90, 90, 0, 0};
+                        const int droll[4] = {0, 0, 90, -90};
+                        auto snap90 = [](float deg) -> float {
+                            int turns = (int)std::round(deg / 90.0f);
+                            turns = ((turns % 4) + 4) % 4;
+                            return (float)(turns * 90);
+                        };
+                        bool rotated = false;
+                        for (int ai = 0; ai < 4; ++ai) {
+                            bool down = (glfwGetKey(window, arrow_keys[ai]) == GLFW_PRESS);
+                            if (down && !arrow_was_down[ai]) {
+                                dungeon_blocks[hover_block_index].rot_y_deg = snap90(dungeon_blocks[hover_block_index].rot_y_deg + (float)dyaw[ai]);
+                                dungeon_blocks[hover_block_index].rot_z_deg = snap90(dungeon_blocks[hover_block_index].rot_z_deg + (float)droll[ai]);
+                                rotated = true;
+                            }
+                            arrow_was_down[ai] = down;
+                        }
+                        if (rotated) {
+                            g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
+                            dirty = true;
+                            UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+                        }
+                    } else {
+                        const int arrow_keys[4] = {GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP, GLFW_KEY_DOWN};
+                        for (int ai = 0; ai < 4; ++ai)
+                            arrow_was_down[ai] = (glfwGetKey(window, arrow_keys[ai]) == GLFW_PRESS);
+                    }
+                } else {
+                    for (int ai = 0; ai < 4; ++ai)
+                        arrow_was_down[ai] = false;
+                }
+            } else {
+                selected_flags.assign(dungeon_blocks.size(), 0);
+                g_VoxelRenderer.setSelection(selected_flags);
+                for (int ai = 0; ai < 4; ++ai)
+                    arrow_was_down[ai] = false;
             }
 
             if (!close_dialog_active && left_state == GLFW_PRESS && !left_was_down && hover_has_block && hover_block_index >= 0 &&
@@ -2644,8 +2796,10 @@ int main(int, char**) {
                                 std::string label = tiles[idx].name.empty() ? tiles[idx].key : tiles[idx].name;
                                 bool selected = (active_slot >= 0 && active_slot < (int)action_slots.size() &&
                                                  action_slots[active_slot] == idx);
-                                if (ImGui::Selectable(label.c_str(), selected))
+                                if (ImGui::Selectable(label.c_str(), selected)) {
                                     action_slots[active_slot] = idx;
+                                    actionbar_dirty = true;
+                                }
                             }
                             ImGui::EndTabItem();
                         }
@@ -2654,6 +2808,11 @@ int main(int, char**) {
                 }
                 ImGui::End();
             }
+        }
+
+        if (actionbar_dirty) {
+            SaveActionBar(actionbar_path, action_slots, tiles, active_slot);
+            actionbar_dirty = false;
         }
 
         if (edit_mode) {
@@ -2683,6 +2842,8 @@ int main(int, char**) {
             FrameRender(wd, main_draw_data);
         FramePresent(wd);
     }
+
+    SaveActionBar(actionbar_path, action_slots, tiles, active_slot);
 
     AppState out_state;
     if (ui_window.state.pos) {
