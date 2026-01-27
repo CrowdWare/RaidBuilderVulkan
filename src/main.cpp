@@ -39,6 +39,8 @@
 #include <cerrno>
 #if defined(_WIN32)
 #include <direct.h>
+#else
+#include <dirent.h>
 #endif
 #include "gltf_loader.h"
 #if defined(__APPLE__)
@@ -270,6 +272,13 @@ static bool LoadFileText(const char* path, std::string* out_text) {
 static bool FileExists(const std::string& path) {
     std::ifstream file(path.c_str());
     return file.good();
+}
+
+static bool DirExists(const std::string& path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0)
+        return false;
+    return (st.st_mode & S_IFDIR) != 0;
 }
 
 static bool EnsureDir(const std::string& path) {
@@ -513,13 +522,22 @@ static void SaveAppState(const std::string& path, const AppState& state) {
 
 struct TileDef {
     std::string key;
+    std::string name;
+    std::string icon;
     std::string texture;
     std::string model;
     std::string type = "block"; // block | prop
     int height_cm = 60;
     int scale_percent = 100;
     int height_blocks = 1;
+    std::string material;
+    std::string placement;
+    std::string category;
 };
+
+// Forward declarations for path resolution helpers used by the tile catalog loader.
+static std::string ResolveRepoDir(const std::string& rel);
+static std::string ResolveWorkspacePath(const std::string& rel);
 
 static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
     if (height_cm <= 0)
@@ -531,6 +549,136 @@ static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
     if (denom <= 0)
         denom = 1;
     return (eff_cm + denom - 1) / denom;
+}
+
+static bool ParseTilesFile(const std::string& path,
+                           const std::string& category,
+                           std::vector<TileDef>* out_tiles,
+                           std::string* error_message) {
+    if (!out_tiles)
+        return false;
+    std::string text;
+    if (!LoadFileText(path.c_str(), &text)) {
+        if (error_message)
+            *error_message = "Could not read tiles file";
+        return false;
+    }
+
+    class TilesHandler : public sml::SmlHandler {
+    public:
+        std::vector<std::string> stack;
+        TileDef tile;
+        std::vector<TileDef> tiles;
+        std::string category;
+
+        explicit TilesHandler(const std::string& cat) : category(cat) {}
+
+        void startElement(const std::string& name) override { stack.push_back(name); }
+        void onProperty(const std::string& name, const sml::PropertyValue& value) override {
+            if (stack.empty() || stack.back() != "Tile")
+                return;
+            if (name == "key" && value.type == sml::PropertyValue::String)
+                tile.key = value.string_value;
+            else if (name == "name" && value.type == sml::PropertyValue::String)
+                tile.name = value.string_value;
+            else if (name == "icon" && value.type == sml::PropertyValue::String)
+                tile.icon = value.string_value;
+            else if (name == "texture" && value.type == sml::PropertyValue::String)
+                tile.texture = value.string_value;
+            else if (name == "model" && value.type == sml::PropertyValue::String)
+                tile.model = value.string_value;
+            else if (name == "type" && value.type == sml::PropertyValue::String)
+                tile.type = value.string_value;
+            else if (name == "material" && value.type == sml::PropertyValue::EnumType)
+                tile.material = value.string_value;
+            else if (name == "placement" && value.type == sml::PropertyValue::EnumType)
+                tile.placement = value.string_value;
+            else if (name == "height_cm" && value.type == sml::PropertyValue::Int)
+                tile.height_cm = value.int_value;
+            else if (name == "scale_percent" && value.type == sml::PropertyValue::Int)
+                tile.scale_percent = value.int_value;
+        }
+        void endElement(const std::string& name) override {
+            if (name == "Tile") {
+                if (!tile.key.empty()) {
+                    tile.category = category;
+                    tile.height_blocks = ComputeHeightBlocks(tile.height_cm, tile.scale_percent, 60);
+                    tiles.push_back(tile);
+                }
+                tile = TileDef();
+            }
+            if (!stack.empty())
+                stack.pop_back();
+        }
+    };
+
+    TilesHandler handler(category);
+    try {
+        sml::SmlSaxParser parser(text);
+        parser.registerEnumValue("material", "texture");
+        parser.registerEnumValue("material", "vertex");
+        parser.registerEnumValue("placement", "ground");
+        parser.registerEnumValue("placement", "wall");
+        parser.registerEnumValue("placement", "ceiling");
+        parser.parse(handler);
+    } catch (const sml::SmlParseException& e) {
+        if (error_message)
+            *error_message = e.what();
+        return false;
+    }
+
+    out_tiles->insert(out_tiles->end(), handler.tiles.begin(), handler.tiles.end());
+    return true;
+}
+
+static std::vector<std::string> ListSubdirs(const std::string& root_dir) {
+    std::vector<std::string> dirs;
+#if defined(_WIN32)
+    (void)root_dir;
+    return dirs;
+#else
+    DIR* dir = opendir(root_dir.c_str());
+    if (!dir)
+        return dirs;
+    struct dirent* ent = nullptr;
+    while ((ent = readdir(dir)) != nullptr) {
+        std::string name = ent->d_name;
+        if (name.empty() || name == "." || name == "..")
+            continue;
+        std::string full = root_dir + "/" + name;
+        if (DirExists(full))
+            dirs.push_back(full);
+    }
+    closedir(dir);
+    std::sort(dirs.begin(), dirs.end());
+#endif
+    return dirs;
+}
+
+static std::vector<TileDef> LoadTileCatalog(std::string* error_message) {
+    std::vector<TileDef> tiles;
+    std::string tiles_root = ResolveRepoDir("tiles");
+    if (tiles_root.empty())
+        tiles_root = ResolveWorkspacePath("RaidBuilder/tiles");
+    if (tiles_root.empty() || !DirExists(tiles_root))
+        return tiles;
+
+    std::vector<std::string> categories = ListSubdirs(tiles_root);
+    for (size_t i = 0; i < categories.size(); ++i) {
+        const std::string& cat_dir = categories[i];
+        size_t slash = cat_dir.find_last_of('/');
+        std::string cat_name = (slash == std::string::npos) ? cat_dir : cat_dir.substr(slash + 1);
+        std::string tiles_file = cat_dir + "/tiles.sml";
+        if (!FileExists(tiles_file))
+            continue;
+        std::string err;
+        if (!ParseTilesFile(tiles_file, cat_name, &tiles, &err)) {
+            if (error_message && error_message->empty())
+                *error_message = err;
+            fprintf(stderr, "Tile catalog error in %s: %s\n", tiles_file.c_str(), err.c_str());
+        }
+    }
+    return tiles;
 }
 
 static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block>& blocks,
@@ -701,6 +849,12 @@ static std::string GetExecutableDir() {
 
 static std::string ResolveRepoPath(const std::string& rel) {
     std::string exe_dir = GetExecutableDir();
+    // First try app bundle resources (macOS packaging).
+#if defined(__APPLE__)
+    std::string bundle_candidate = exe_dir + "/../Resources/RaidBuilder/" + rel;
+    if (FileExists(bundle_candidate))
+        return bundle_candidate;
+#endif
     std::string dir = exe_dir;
     for (int i = 0; i < 6; ++i) {
         std::string candidate = dir + "/RaidBuilder/" + rel;
@@ -712,6 +866,27 @@ static std::string ResolveRepoPath(const std::string& rel) {
         dir = dir.substr(0, slash);
     }
     return "RaidBuilder/" + rel;
+}
+
+static std::string ResolveRepoDir(const std::string& rel) {
+    std::string exe_dir = GetExecutableDir();
+#if defined(__APPLE__)
+    std::string bundle_candidate = exe_dir + "/../Resources/RaidBuilder/" + rel;
+    if (DirExists(bundle_candidate))
+        return bundle_candidate;
+#endif
+    std::string dir = exe_dir;
+    for (int i = 0; i < 6; ++i) {
+        std::string candidate = dir + "/RaidBuilder/" + rel;
+        if (DirExists(candidate))
+            return candidate;
+        size_t slash = dir.find_last_of('/');
+        if (slash == std::string::npos)
+            break;
+        dir = dir.substr(0, slash);
+    }
+    std::string fallback = "RaidBuilder/" + rel;
+    return DirExists(fallback) ? fallback : "";
 }
 
 static std::string ResolveWorkspacePath(const std::string& rel) {
@@ -729,13 +904,35 @@ static std::string ResolveWorkspacePath(const std::string& rel) {
     return rel;
 }
 
+static std::string StripResPrefix(const std::string& path) {
+    const std::string prefix = "res://";
+    if (path.compare(0, prefix.size(), prefix) == 0)
+        return path.substr(prefix.size());
+    return path;
+}
+
 static std::string ResolveModelPath(const std::string& path) {
     if (path.empty())
         return path;
-    if (path[0] == '/' || path[0] == '.')
+    if (path[0] == '/') 
         return path;
-    if (path.find('/') != std::string::npos || path.find('\\') != std::string::npos)
+    // If a relative path is provided (e.g. ../build/blocks_cache/foo.glb),
+    // resolve it against the workspace/app layout first.
+    if (path[0] == '.' || path.find('/') != std::string::npos || path.find('\\') != std::string::npos) {
+        std::string candidate = ResolveWorkspacePath(path);
+        if (FileExists(candidate))
+            return candidate;
+        candidate = ResolveRepoPath(path);
+        if (FileExists(candidate))
+            return candidate;
         return path;
+    }
+    std::string exe_dir = GetExecutableDir();
+#if defined(__APPLE__)
+    std::string bundle_candidate = exe_dir + "/../Resources/build/blocks_cache/" + path;
+    if (FileExists(bundle_candidate))
+        return bundle_candidate;
+#endif
     std::string candidate = ResolveWorkspacePath(std::string("build/blocks_cache/") + path);
     if (FileExists(candidate))
         return candidate;
@@ -838,12 +1035,20 @@ static bool ParseDungeon(const std::string& text,
                 lines = value.string_value;
             if (stack.back() == "Tile" && name == "key" && value.type == sml::PropertyValue::String)
                 tile.key = value.string_value;
+            if (stack.back() == "Tile" && name == "name" && value.type == sml::PropertyValue::String)
+                tile.name = value.string_value;
+            if (stack.back() == "Tile" && name == "icon" && value.type == sml::PropertyValue::String)
+                tile.icon = value.string_value;
             if (stack.back() == "Tile" && name == "texture" && value.type == sml::PropertyValue::String)
                 tile.texture = value.string_value;
             if (stack.back() == "Tile" && name == "model" && value.type == sml::PropertyValue::String)
                 tile.model = value.string_value;
             if (stack.back() == "Tile" && name == "type" && value.type == sml::PropertyValue::String)
                 tile.type = value.string_value;
+            if (stack.back() == "Tile" && name == "material" && value.type == sml::PropertyValue::EnumType)
+                tile.material = value.string_value;
+            if (stack.back() == "Tile" && name == "placement" && value.type == sml::PropertyValue::EnumType)
+                tile.placement = value.string_value;
             if (stack.back() == "Tile" && name == "height_cm" && value.type == sml::PropertyValue::Int)
                 tile.height_cm = value.int_value;
             if (stack.back() == "Tile" && name == "scale_percent" && value.type == sml::PropertyValue::Int)
@@ -865,6 +1070,11 @@ static bool ParseDungeon(const std::string& text,
     DungeonHandler handler;
     try {
         sml::SmlSaxParser parser(text);
+        parser.registerEnumValue("material", "texture");
+        parser.registerEnumValue("material", "vertex");
+        parser.registerEnumValue("placement", "ground");
+        parser.registerEnumValue("placement", "wall");
+        parser.registerEnumValue("placement", "ceiling");
         parser.parse(handler);
     } catch (const sml::SmlParseException& e) {
         if (error_message)
@@ -1360,13 +1570,38 @@ int main(int, char**) {
     std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
     std::vector<unsigned char> selected_flags;
     std::vector<TileDef> tiles;
+    std::vector<TileDef> dungeon_tiles;
     std::string default_texture_path = "assets/textures/raid_stone.png";
+    std::string catalog_error;
+    std::vector<TileDef> catalog_tiles = LoadTileCatalog(&catalog_error);
+    if (!catalog_error.empty())
+        fprintf(stderr, "Tile catalog parse error: %s\n", catalog_error.c_str());
     std::string dungeon_text;
     std::string dungeon_error;
     if (!LoadFileText(current_dungeon_path.c_str(), &dungeon_text)) {
         fprintf(stderr, "Dungeon load error: could not read %s\n", current_dungeon_path.c_str());
-    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &tiles, &dungeon_error)) {
+    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &dungeon_tiles, &dungeon_error)) {
         fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
+    }
+    if (!catalog_tiles.empty()) {
+        tiles = catalog_tiles;
+        std::map<std::string, size_t> by_key;
+        for (size_t i = 0; i < tiles.size(); ++i)
+            by_key[tiles[i].key] = i;
+        for (size_t i = 0; i < dungeon_tiles.size(); ++i) {
+            const TileDef& src = dungeon_tiles[i];
+            std::map<std::string, size_t>::iterator it = by_key.find(src.key);
+            if (it != by_key.end()) {
+                TileDef merged = src;
+                if (merged.category.empty())
+                    merged.category = tiles[it->second].category;
+                tiles[it->second] = merged;
+            } else if (!src.key.empty()) {
+                tiles.push_back(src);
+            }
+        }
+    } else {
+        tiles = dungeon_tiles;
     }
     if (tiles.empty()) {
         TileDef tile;
@@ -1380,26 +1615,19 @@ int main(int, char**) {
         tiles.push_back(tile);
     }
 
-    std::vector<std::string> block_texture_paths;
-    block_texture_paths.reserve(tiles.size());
-    for (size_t i = 0; i < tiles.size(); ++i) {
-        std::string tex = tiles[i].texture.empty() ? default_texture_path : tiles[i].texture;
-        std::string resolved = ResolveRepoPath(tex);
-        if (!FileExists(resolved)) {
-            std::string fallback = ResolveRepoPath(default_texture_path);
-            fprintf(stderr, "Missing tile texture: %s (tile '%s'), using %s\n",
-                    resolved.c_str(), tiles[i].key.c_str(), fallback.c_str());
-            resolved = fallback;
-        }
-        block_texture_paths.push_back(resolved);
-    }
-
     std::vector<voxel::VoxelRenderer::MeshData> tile_meshes;
     std::vector<bool> tile_mesh_has_uv;
     tile_meshes.reserve(tiles.size());
     tile_mesh_has_uv.reserve(tiles.size());
     for (size_t i = 0; i < tiles.size(); ++i) {
         std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
+        if (model.compare(0, 8, "texture:") == 0) {
+            std::string tex_from_model = StripResPrefix(model.substr(8));
+            if (!tex_from_model.empty())
+                tiles[i].texture = tex_from_model;
+            model = "block.glb";
+        }
+        model = StripResPrefix(model);
         std::string model_path = ResolveModelPath(model);
         GltfMesh mesh;
         std::string mesh_error;
@@ -1416,6 +1644,21 @@ int main(int, char**) {
         }
     }
 
+    std::vector<std::string> block_texture_paths;
+    block_texture_paths.reserve(tiles.size());
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        std::string tex = tiles[i].texture.empty() ? default_texture_path : tiles[i].texture;
+        tex = StripResPrefix(tex);
+        std::string resolved = ResolveRepoPath(tex);
+        if (!FileExists(resolved)) {
+            std::string fallback = ResolveRepoPath(default_texture_path);
+            fprintf(stderr, "Missing tile texture: %s (tile '%s'), using %s\n",
+                    resolved.c_str(), tiles[i].key.c_str(), fallback.c_str());
+            resolved = fallback;
+        }
+        block_texture_paths.push_back(resolved);
+    }
+
     auto tile_tex_index_for = [&](size_t index) -> int {
         if (index >= tiles.size())
             return -2;
@@ -1424,15 +1667,31 @@ int main(int, char**) {
         return (int)index;
     };
 
+    std::map<std::string, int> tile_index_by_key;
+    for (size_t i = 0; i < tiles.size(); ++i)
+        tile_index_by_key[tiles[i].key] = (int)i;
     for (size_t i = 0; i < dungeon_blocks.size(); ++i) {
-        int idx = dungeon_blocks[i].tex_index;
+        int idx = 0;
+        std::map<std::string, int>::const_iterator it = tile_index_by_key.find(dungeon_blocks[i].key);
+        if (it != tile_index_by_key.end())
+            idx = it->second;
         dungeon_blocks[i].mesh_index = idx;
-        dungeon_blocks[i].tex_index = tile_tex_index_for(idx);
+        dungeon_blocks[i].tex_index = tile_tex_index_for((size_t)idx);
     }
 
-    const std::string active_tile_key = tiles.front().key;
-    const int active_mesh_index = 0;
-    const int active_tex_index = tile_tex_index_for(0);
+    std::map<std::string, std::vector<int> > tiles_by_category;
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        std::string cat = tiles[i].category.empty() ? "Core" : tiles[i].category;
+        tiles_by_category[cat].push_back((int)i);
+    }
+
+    std::vector<int> action_slots(10, -1);
+    for (int i = 0; i < 10 && i < (int)tiles.size(); ++i)
+        action_slots[i] = i;
+    int active_slot = 0;
+    bool inventory_open = false;
+    bool slot_was_down[10] = {false, false, false, false, false, false, false, false, false, false};
+
     selected_flags.assign(dungeon_blocks.size(), 0);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     std::string base_window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title;
@@ -1545,6 +1804,7 @@ int main(int, char**) {
     bool close_pending = false;
     bool close_request = false;
     bool close_dialog_active = false;
+    bool inventory_block_prev = false;
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     double last_mouse_x = 0.0;
     double last_mouse_y = 0.0;
@@ -1561,6 +1821,7 @@ int main(int, char**) {
     bool q_was_down = false;
     bool g_was_down = false;
     bool esc_was_down = false;
+    bool inv_was_down = false;
     bool save_was_down = false;
     bool right_was_down = false;
     bool left_was_down = false;
@@ -1658,6 +1919,47 @@ int main(int, char**) {
             esc_was_down = false;
         }
 
+        if (!close_dialog_active) {
+            bool inv_down = (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS);
+            if (inv_down && !inv_was_down)
+                inventory_open = !inventory_open;
+            inv_was_down = inv_down;
+
+            const int slot_keys[10] = {
+                GLFW_KEY_1, GLFW_KEY_2, GLFW_KEY_3, GLFW_KEY_4, GLFW_KEY_5,
+                GLFW_KEY_6, GLFW_KEY_7, GLFW_KEY_8, GLFW_KEY_9, GLFW_KEY_0
+            };
+            for (int i = 0; i < 10; ++i) {
+                bool down = (glfwGetKey(window, slot_keys[i]) == GLFW_PRESS);
+                if (down && !slot_was_down[i])
+                    active_slot = i;
+                slot_was_down[i] = down;
+            }
+        } else {
+            inv_was_down = false;
+            for (int i = 0; i < 10; ++i)
+                slot_was_down[i] = false;
+        }
+
+        int active_tile_index = 0;
+        if (active_slot >= 0 && active_slot < (int)action_slots.size() && action_slots[active_slot] >= 0)
+            active_tile_index = action_slots[active_slot];
+        if (active_tile_index < 0 || active_tile_index >= (int)tiles.size())
+            active_tile_index = 0;
+        const std::string active_tile_key = tiles[active_tile_index].key;
+        const int active_mesh_index = active_tile_index;
+        const int active_tex_index = tile_tex_index_for((size_t)active_tile_index);
+        bool inventory_blocks_controls = (inventory_open && !close_dialog_active);
+        if (inventory_blocks_controls != inventory_block_prev) {
+            if (inventory_blocks_controls) {
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            } else {
+                glfwSetInputMode(window, GLFW_CURSOR, edit_mode ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+                first_mouse = true;
+            }
+            inventory_block_prev = inventory_blocks_controls;
+        }
+
         bool save_key_down = (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
         bool cmd_down = (glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS) ||
                         (glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS);
@@ -1713,7 +2015,7 @@ int main(int, char**) {
         last_mouse_x = mouse_x;
         last_mouse_y = mouse_y;
 
-        if (!edit_mode) {
+        if (!edit_mode && !(inventory_open && !close_dialog_active)) {
             const float mouse_sens = 0.0025f;
             camera_yaw += dx * mouse_sens;
             camera_pitch -= dy * mouse_sens;
@@ -1734,62 +2036,68 @@ int main(int, char**) {
         float speed = 5.0f;
 
         if (!edit_mode) {
-            if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
-                camera_x += forward_x * speed * dt;
-                camera_z += forward_z * speed * dt;
-            }
-            if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
-                if (!suppress_backward) {
-                    camera_x -= forward_x * speed * dt;
-                    camera_z -= forward_z * speed * dt;
+            bool controls_blocked = (inventory_open && !close_dialog_active);
+            if (!controls_blocked) {
+                if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+                    camera_x += forward_x * speed * dt;
+                    camera_z += forward_z * speed * dt;
                 }
-            }
-            if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
-                camera_x -= right_x * speed * dt;
-                camera_z -= right_z * speed * dt;
-            }
-            if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
-                camera_x += right_x * speed * dt;
-                camera_z += right_z * speed * dt;
-            }
+                if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+                    if (!suppress_backward) {
+                        camera_x -= forward_x * speed * dt;
+                        camera_z -= forward_z * speed * dt;
+                    }
+                }
+                if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+                    camera_x -= right_x * speed * dt;
+                    camera_z -= right_z * speed * dt;
+                }
+                if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+                    camera_x += right_x * speed * dt;
+                    camera_z += right_z * speed * dt;
+                }
 
-            bool e_down = (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
-            bool q_down = (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
-            if (e_down && q_down) {
-                gravity_enabled = true;
-                vertical_velocity = 0.0f;
-            } else if (e_down && !e_was_down) {
-                gravity_enabled = false;
-                vertical_velocity = 0.0f;
-            }
-
-            if (gravity_enabled) {
-                const float gravity = -9.8f;
-                vertical_velocity += gravity * dt;
-                camera_y += vertical_velocity * dt;
-                if (camera_y < eye_height) {
-                    camera_y = eye_height;
+                bool e_down = (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
+                bool q_down = (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
+                if (e_down && q_down) {
+                    gravity_enabled = true;
+                    vertical_velocity = 0.0f;
+                } else if (e_down && !e_was_down) {
+                    gravity_enabled = false;
                     vertical_velocity = 0.0f;
                 }
-            }
 
-            if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && camera_y <= eye_height + 0.001f) {
-                float jump_speed = std::sqrt(2.0f * 9.8f * block_size);
-                vertical_velocity = jump_speed;
-            }
+                if (gravity_enabled) {
+                    const float gravity = -9.8f;
+                    vertical_velocity += gravity * dt;
+                    camera_y += vertical_velocity * dt;
+                    if (camera_y < eye_height) {
+                        camera_y = eye_height;
+                        vertical_velocity = 0.0f;
+                    }
+                }
 
-            if (e_down) {
-                if (!e_was_down)
-                    camera_y += block_size;
-                e_was_down = true;
+                if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && camera_y <= eye_height + 0.001f) {
+                    float jump_speed = std::sqrt(2.0f * 9.8f * block_size);
+                    vertical_velocity = jump_speed;
+                }
+
+                if (e_down) {
+                    if (!e_was_down)
+                        camera_y += block_size;
+                    e_was_down = true;
+                } else {
+                    e_was_down = false;
+                }
+                if (q_down) {
+                    if (!q_was_down)
+                        camera_y -= block_size;
+                    q_was_down = true;
+                } else {
+                    q_was_down = false;
+                }
             } else {
                 e_was_down = false;
-            }
-            if (q_down) {
-                if (!q_was_down)
-                    camera_y -= block_size;
-                q_was_down = true;
-            } else {
                 q_was_down = false;
             }
         } else {
@@ -2276,6 +2584,78 @@ int main(int, char**) {
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         bool play_clicked = false;
+        if (!close_dialog_active && !edit_mode) {
+            // Action bar (10 slots) anchored at the bottom.
+            const float margin = 12.0f * main_scale;
+            const float target_h = 64.0f * main_scale;
+            ImVec2 bar_size(viewport->Size.x - margin * 2.0f, target_h);
+            if (bar_size.x < 320.0f * main_scale)
+                bar_size.x = 320.0f * main_scale;
+            ImVec2 bar_pos(viewport->Pos.x + (viewport->Size.x - bar_size.x) * 0.5f,
+                           viewport->Pos.y + viewport->Size.y - bar_size.y - margin);
+            ImGui::SetNextWindowPos(bar_pos, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(bar_size, ImGuiCond_Always);
+            ImGuiWindowFlags bar_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                         ImGuiWindowFlags_NoScrollbar;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f * main_scale, 6.0f * main_scale));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * main_scale, 0.0f));
+            if (ImGui::Begin("ActionBar", nullptr, bar_flags)) {
+                float avail_w = ImGui::GetContentRegionAvail().x;
+                float spacing = ImGui::GetStyle().ItemSpacing.x;
+                float slot_w = (avail_w - spacing * 9.0f) / 10.0f;
+                if (slot_w < 24.0f * main_scale)
+                    slot_w = 24.0f * main_scale;
+                ImVec2 slot_size(slot_w, bar_size.y - 12.0f * main_scale);
+                for (int i = 0; i < 10; ++i) {
+                    int tile_idx = (i >= 0 && i < (int)action_slots.size()) ? action_slots[i] : -1;
+                    std::string name = "-";
+                    if (tile_idx >= 0 && tile_idx < (int)tiles.size())
+                        name = tiles[tile_idx].name.empty() ? tiles[tile_idx].key : tiles[tile_idx].name;
+                    int slot_num = (i == 9) ? 0 : (i + 1);
+                    std::string label = std::to_string(slot_num) + ":" + name;
+                    if (i == active_slot)
+                        label = "[" + label + "]";
+                    ImGui::PushID(i);
+                    if (ImGui::Button(label.c_str(), slot_size))
+                        active_slot = i;
+                    ImGui::PopID();
+                    if (i < 9)
+                        ImGui::SameLine();
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+
+            if (inventory_open) {
+                ImGui::SetNextWindowSize(ImVec2(720.0f * main_scale, 420.0f * main_scale), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Inventory", &inventory_open)) {
+                    ImGui::Text("Active slot: %d", (active_slot == 9) ? 0 : (active_slot + 1));
+                    if (ImGui::BeginTabBar("InventoryTabs")) {
+                        for (std::map<std::string, std::vector<int> >::const_iterator it = tiles_by_category.begin();
+                             it != tiles_by_category.end(); ++it) {
+                            if (!ImGui::BeginTabItem(it->first.c_str()))
+                                continue;
+                            const std::vector<int>& idxs = it->second;
+                            for (size_t ti = 0; ti < idxs.size(); ++ti) {
+                                int idx = idxs[ti];
+                                if (idx < 0 || idx >= (int)tiles.size())
+                                    continue;
+                                std::string label = tiles[idx].name.empty() ? tiles[idx].key : tiles[idx].name;
+                                bool selected = (active_slot >= 0 && active_slot < (int)action_slots.size() &&
+                                                 action_slots[active_slot] == idx);
+                                if (ImGui::Selectable(label.c_str(), selected))
+                                    action_slots[active_slot] = idx;
+                            }
+                            ImGui::EndTabItem();
+                        }
+                        ImGui::EndTabBar();
+                    }
+                }
+                ImGui::End();
+            }
+        }
+
         if (edit_mode) {
             ui_document.render(viewport, font_15, &play_clicked);
             if (play_clicked) {

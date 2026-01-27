@@ -6,5 +6,5 @@
     MenuItem { label:"Exit" onClick: requestClose }
     requestClose ist hier ein enum und verweist auf sms 
     fun requestClose() {}
-- Action bar and inventory for blocks
-- Tiles folder
+- Action bar and inventory with icons, save actionbar
+- Vulkan ins .app legen
