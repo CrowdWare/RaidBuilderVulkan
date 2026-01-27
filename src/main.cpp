@@ -486,9 +486,15 @@ static void SaveAppState(const std::string& path, const AppState& state) {
         file << "lastFilePath=" << state.last_file_path << "\n";
 }
 
+struct TileDef {
+    std::string key;
+    std::string texture;
+    std::string model;
+};
+
 static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block>& blocks,
                                    float block_size,
-                                   const std::string& tile_model_path) {
+                                   const std::vector<TileDef>& tiles) {
     if (blocks.empty())
         return "Dungeon {\n}\n";
 
@@ -500,14 +506,15 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
         int max_z = 0;
     };
 
-    std::map<int, std::map<std::pair<int, int>, char> > layers;
+    std::map<int, std::map<std::pair<int, int>, std::string> > layers;
     std::map<int, Bounds> bounds;
 
     for (size_t i = 0; i < blocks.size(); ++i) {
         int gx = (int)std::round(blocks[i].x / block_size);
         int gz = (int)std::round(blocks[i].z / block_size);
         int layer = (int)std::round(blocks[i].y / block_size - 0.5f);
-        layers[layer][std::make_pair(gx, gz)] = 's';
+        std::string key = blocks[i].key.empty() ? "s" : blocks[i].key;
+        layers[layer][std::make_pair(gx, gz)] = key;
         Bounds& b = bounds[layer];
         if (!b.has) {
             b.has = true;
@@ -525,14 +532,14 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
     out << "Dungeon {\n";
     out << "    TileMap {\n";
     out << "        lines: \"\n";
-    for (std::map<int, std::map<std::pair<int, int>, char> >::const_iterator it = layers.begin(); it != layers.end(); ++it) {
+    for (std::map<int, std::map<std::pair<int, int>, std::string> >::const_iterator it = layers.begin(); it != layers.end(); ++it) {
         int layer = it->first;
         Bounds b = bounds[layer];
         out << "#" << layer << "\n";
         for (int z = b.min_z; z <= b.max_z; ++z) {
             for (int x = b.min_x; x <= b.max_x; ++x) {
-                std::map<std::pair<int, int>, char>::const_iterator cell = it->second.find(std::make_pair(x, z));
-                char value = (cell != it->second.end()) ? cell->second : '.';
+                std::map<std::pair<int, int>, std::string>::const_iterator cell = it->second.find(std::make_pair(x, z));
+                const std::string value = (cell != it->second.end()) ? cell->second : ".";
                 out << value;
                 if (x < b.max_x)
                     out << " ";
@@ -542,9 +549,13 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
     }
     out << "        \"\n";
     out << "    }\n\n";
-    if (!tile_model_path.empty()) {
+    if (!tiles.empty()) {
         out << "    Tiles {\n";
-        out << "        Tile { key: \"s\" model: \"" << tile_model_path << "\" }\n";
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            const std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
+            out << "        Tile { key: \"" << tiles[i].key << "\" texture: \"" << tiles[i].texture
+                << "\" model: \"" << model << "\" }\n";
+        }
         out << "    }\n\n";
     }
     out << "}\n";
@@ -554,7 +565,7 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
 static bool SaveDungeonWithHistory(const std::string& path,
                                    const std::vector<voxel::VoxelRenderer::Block>& blocks,
                                    float block_size,
-                                   const std::string& tile_model_path) {
+                                   const std::vector<TileDef>& tiles) {
     if (path.empty())
         return false;
     if (FileExists(path)) {
@@ -572,7 +583,7 @@ static bool SaveDungeonWithHistory(const std::string& path,
     std::ofstream out(path.c_str(), std::ios::trunc);
     if (!out.is_open())
         return false;
-    out << BuildDungeonSml(blocks, block_size, tile_model_path);
+    out << BuildDungeonSml(blocks, block_size, tiles);
     return true;
 }
 
@@ -590,15 +601,14 @@ static std::string ResolveAssetPath(const std::string& path, const char* prefix)
 static bool ParseDungeon(const std::string& text,
                          float block_size,
                          std::vector<voxel::VoxelRenderer::Block>* out_blocks,
-                         std::string* out_block_texture,
+                         std::vector<TileDef>* out_tiles,
                          std::string* error_message) {
     class DungeonHandler : public sml::SmlHandler {
     public:
         std::string lines;
         std::vector<std::string> stack;
-        std::string tile_key;
-        std::string tile_model;
-        std::map<std::string, std::string> tile_models;
+        TileDef tile;
+        std::vector<TileDef> tiles;
 
         void startElement(const std::string& name) override { stack.push_back(name); }
         void onProperty(const std::string& name, const sml::PropertyValue& value) override {
@@ -607,16 +617,17 @@ static bool ParseDungeon(const std::string& text,
             if (stack.back() == "TileMap" && name == "lines" && value.type == sml::PropertyValue::String)
                 lines = value.string_value;
             if (stack.back() == "Tile" && name == "key" && value.type == sml::PropertyValue::String)
-                tile_key = value.string_value;
+                tile.key = value.string_value;
+            if (stack.back() == "Tile" && name == "texture" && value.type == sml::PropertyValue::String)
+                tile.texture = value.string_value;
             if (stack.back() == "Tile" && name == "model" && value.type == sml::PropertyValue::String)
-                tile_model = value.string_value;
+                tile.model = value.string_value;
         }
         void endElement(const std::string& name) override {
             if (name == "Tile") {
-                if (!tile_key.empty() && !tile_model.empty())
-                    tile_models[tile_key] = tile_model;
-                tile_key.clear();
-                tile_model.clear();
+                if (!tile.key.empty() && !tile.texture.empty())
+                    tiles.push_back(tile);
+                tile = TileDef();
             }
             if (!stack.empty())
                 stack.pop_back();
@@ -633,11 +644,8 @@ static bool ParseDungeon(const std::string& text,
         return false;
     }
 
-    if (out_block_texture) {
-        std::map<std::string, std::string>::const_iterator it = handler.tile_models.find("s");
-        if (it != handler.tile_models.end())
-            *out_block_texture = it->second;
-    }
+    if (out_tiles)
+        *out_tiles = handler.tiles;
 
     if (handler.lines.empty()) {
         out_blocks->clear();
@@ -651,6 +659,12 @@ static bool ParseDungeon(const std::string& text,
     int max_cols = 0;
     int max_rows = 0;
     std::vector<int> row_counts(1, 0);
+
+    std::map<std::string, int> tex_index_map;
+    if (!handler.tiles.empty()) {
+        for (size_t i = 0; i < handler.tiles.size(); ++i)
+            tex_index_map[handler.tiles[i].key] = (int)i;
+    }
 
     while (std::getline(iss, line)) {
         if (line.empty())
@@ -670,11 +684,15 @@ static bool ParseDungeon(const std::string& text,
             size_t colon = id.find(':');
             if (colon != std::string::npos)
                 id = id.substr(0, colon);
-            if (id == "s") {
+            if (!handler.tiles.empty() && tex_index_map.find(id) == tex_index_map.end())
+                continue;
+            if (id != ".") {
                 voxel::VoxelRenderer::Block block;
                 block.x = (float)col;
                 block.y = (float)current_layer;
                 block.z = (float)row_counts[current_layer];
+                block.key = id;
+                block.tex_index = tex_index_map.empty() ? 0 : tex_index_map[id];
                 blocks.push_back(block);
             }
             col++;
@@ -1086,17 +1104,29 @@ int main(int, char**) {
     const float block_size = 0.6f;
     std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
     std::vector<unsigned char> selected_flags;
-    std::string block_texture_path = "RaidBuilder/assets/textures/raid_stone.png";
-    std::string tile_model_path = block_texture_path;
+    std::vector<TileDef> tiles;
+    std::string default_texture_path = "RaidBuilder/assets/textures/raid_stone.png";
     std::string dungeon_text;
     std::string dungeon_error;
     if (!LoadFileText(current_dungeon_path.c_str(), &dungeon_text)) {
         fprintf(stderr, "Dungeon load error: could not read %s\n", current_dungeon_path.c_str());
-    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &block_texture_path, &dungeon_error)) {
+    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &tiles, &dungeon_error)) {
         fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
     }
-    tile_model_path = block_texture_path;
-    block_texture_path = ResolveAssetPath(block_texture_path, "RaidBuilder/");
+    if (tiles.empty()) {
+        TileDef tile;
+        tile.key = "s";
+        tile.texture = default_texture_path;
+        tile.model = "block.glb";
+        tiles.push_back(tile);
+    }
+
+    std::vector<std::string> block_texture_paths;
+    block_texture_paths.reserve(tiles.size());
+    for (size_t i = 0; i < tiles.size(); ++i)
+        block_texture_paths.push_back(ResolveAssetPath(tiles[i].texture, "RaidBuilder/"));
+    const std::string active_tile_key = tiles.front().key;
+    const int active_tex_index = 0;
     selected_flags.assign(dungeon_blocks.size(), 0);
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
     std::string base_window_title = ui_window.title.empty() ? "RaidBuilder" : ui_window.title;
@@ -1132,7 +1162,7 @@ int main(int, char**) {
                               "RaidBuilder/shaders/pick.vert.spv",
                               "RaidBuilder/shaders/pick.frag.spv",
                               "RaidBuilder/assets/textures/raid_ground.png",
-                              block_texture_path.c_str())) {
+                              block_texture_paths)) {
         fprintf(stderr, "VoxelRenderer init failed (missing shaders?)\n");
     }
     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
@@ -1310,7 +1340,7 @@ int main(int, char**) {
                          (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
         bool save_combo = save_key_down && (cmd_down || ctrl_down);
         if (save_combo && !save_was_down) {
-            if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tile_model_path)) {
+            if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                 saved_state.last_file_path = current_dungeon_path;
                 SaveAppState(state_path, saved_state);
                 dirty = false;
@@ -1561,7 +1591,12 @@ int main(int, char**) {
                             float dist2 = dx * dx + dy * dy + dz * dz;
                             if (dist2 <= max_place_distance * max_place_distance &&
                                 FindBlockAt(dungeon_blocks, place_x, place_y, place_z, 0.001f) < 0) {
-                                voxel::VoxelRenderer::Block new_block = {place_x, place_y, place_z};
+                                voxel::VoxelRenderer::Block new_block;
+                                new_block.x = place_x;
+                                new_block.y = place_y;
+                                new_block.z = place_z;
+                                new_block.tex_index = active_tex_index;
+                                new_block.key = active_tile_key;
                                 dungeon_blocks.push_back(new_block);
                                 selected_flags.assign(dungeon_blocks.size(), 0);
                                 selected_flags.back() = 1;
@@ -1606,7 +1641,12 @@ int main(int, char**) {
                             }
                         }
                         if (ghost_hit && !ghost_hover_last) {
-                            voxel::VoxelRenderer::Block new_block = {free_x, free_y, free_z};
+                            voxel::VoxelRenderer::Block new_block;
+                            new_block.x = free_x;
+                            new_block.y = free_y;
+                            new_block.z = free_z;
+                            new_block.tex_index = active_tex_index;
+                            new_block.key = active_tile_key;
                             dungeon_blocks.push_back(new_block);
                             selected_flags.assign(dungeon_blocks.size(), 0);
                             selected_flags.back() = 1;
@@ -1648,7 +1688,12 @@ int main(int, char**) {
                                                      block_size, max_paint_blocks,
                                                      &free_x, &free_y, &free_z);
                 if (dist2 <= max_place_distance * max_place_distance && free_ok) {
-                    voxel::VoxelRenderer::Block new_block = {free_x, free_y, free_z};
+                    voxel::VoxelRenderer::Block new_block;
+                    new_block.x = free_x;
+                    new_block.y = free_y;
+                    new_block.z = free_z;
+                    new_block.tex_index = active_tex_index;
+                    new_block.key = active_tile_key;
                     dungeon_blocks.push_back(new_block);
                     selected_flags.assign(dungeon_blocks.size(), 0);
                     selected_flags.back() = 1;
@@ -1693,7 +1738,7 @@ int main(int, char**) {
             ImGui::TextUnformatted("You have unsaved changes.");
             ImGui::Separator();
             if (ImGui::Button("Save")) {
-                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tile_model_path)) {
+                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                     saved_state.last_file_path = current_dungeon_path;
                     SaveAppState(state_path, saved_state);
                     dirty = false;
