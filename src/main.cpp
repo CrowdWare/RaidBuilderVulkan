@@ -1565,6 +1565,7 @@ int main(int, char**) {
     bool right_was_down = false;
     bool left_was_down = false;
     bool suppress_backward = false;
+    bool gravity_enabled = true;
     bool painting = false;
     bool ghost_hover_last = false;
     int paint_count = 0;
@@ -1752,34 +1753,46 @@ int main(int, char**) {
                 camera_z += right_z * speed * dt;
             }
 
-            const float gravity = -9.8f;
-            vertical_velocity += gravity * dt;
-            camera_y += vertical_velocity * dt;
-            if (camera_y < eye_height) {
-                camera_y = eye_height;
+            bool e_down = (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
+            bool q_down = (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
+            if (e_down && q_down) {
+                gravity_enabled = true;
                 vertical_velocity = 0.0f;
+            } else if (e_down && !e_was_down) {
+                gravity_enabled = false;
+                vertical_velocity = 0.0f;
+            }
+
+            if (gravity_enabled) {
+                const float gravity = -9.8f;
+                vertical_velocity += gravity * dt;
+                camera_y += vertical_velocity * dt;
+                if (camera_y < eye_height) {
+                    camera_y = eye_height;
+                    vertical_velocity = 0.0f;
+                }
             }
 
             if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && camera_y <= eye_height + 0.001f) {
                 float jump_speed = std::sqrt(2.0f * 9.8f * block_size);
                 vertical_velocity = jump_speed;
             }
-        } else {
-            if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
+
+            if (e_down) {
                 if (!e_was_down)
                     camera_y += block_size;
                 e_was_down = true;
             } else {
                 e_was_down = false;
             }
-            if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
+            if (q_down) {
                 if (!q_was_down)
                     camera_y -= block_size;
                 q_was_down = true;
             } else {
                 q_was_down = false;
             }
-
+        } else {
             if (!close_dialog_active) {
                 int left_state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
                 if (left_state == GLFW_PRESS && !selecting) {
@@ -2054,6 +2067,8 @@ int main(int, char**) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         bool ui_capture_mouse = ImGui::GetIO().WantCaptureMouse;
+        if (!edit_mode && !close_dialog_active)
+            ui_capture_mouse = false;
 
         if (close_pending) {
             ImGui::OpenPopup("Unsaved Changes");
@@ -2261,18 +2276,20 @@ int main(int, char**) {
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         bool play_clicked = false;
-        ui_document.render(viewport, font_15, &play_clicked);
-        if (play_clicked) {
-            edit_mode = false;
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            first_mouse = true;
-            selecting = false;
-            right_was_down = false;
-            hover_has_block = false;
-            hover_has_ground = false;
-            hover_block_index = -1;
-            std::fill(selected_flags.begin(), selected_flags.end(), 0);
-            g_VoxelRenderer.setSelection(selected_flags);
+        if (edit_mode) {
+            ui_document.render(viewport, font_15, &play_clicked);
+            if (play_clicked) {
+                edit_mode = false;
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                first_mouse = true;
+                selecting = false;
+                right_was_down = false;
+                hover_has_block = false;
+                hover_has_ground = false;
+                hover_block_index = -1;
+                std::fill(selected_flags.begin(), selected_flags.end(), 0);
+                g_VoxelRenderer.setSelection(selected_flags);
+            }
         }
 
         ImGui::Render();
