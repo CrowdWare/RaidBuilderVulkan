@@ -60,3 +60,11 @@ Tile {
     model: "../build/blocks_cache/block.glb"
     material: texture
 }
+
+Tile {
+    key: "D"
+    name: "DiceDebug"
+    icon: "assets/textures/raid_stone.png"
+    model: "../build/blocks_cache/dice.glb"
+    material: vertex
+}

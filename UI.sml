@@ -58,7 +58,7 @@ Window {
 
         Right {
             label: "Properties"
-            width: 360
+            width: 500
             PropertyPanel { }
         }
 
