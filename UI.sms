@@ -1,0 +1,23 @@
+/* sample
+fun closeQuery() {
+    app.closeQuery()
+}
+
+fun setPlayMode(on) {
+    app.setPlayMode(on)
+}
+*/
+
+val CLOSE_QUERY = 1
+val SET_PLAY_MODE = 2
+
+register(enum, "MENUITEM", "closeQuery", CLOSE_QUERY)
+register(enum, "MENUITEM", "setPlayMode", SET_PLAY_MODE)
+
+menuItemSelected(id) {
+    when(id) {
+        CLOSE_QUERY -> app.closeQuery()
+        SET_PLAY_MODE -> app.setPlayMode(true)
+        else -> print("unknown menu id: $id")
+    }
+}
