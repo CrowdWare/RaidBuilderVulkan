@@ -2394,7 +2394,7 @@ int main(int, char**) {
     std::vector<unsigned char> selected_flags;
     std::vector<TileDef> tiles;
     std::vector<TileDef> dungeon_tiles;
-    std::string default_texture_path = "assets/textures/raid_stone.png";
+    std::string default_texture_path = "Assets/textures/raid_stone.png";
     std::string catalog_error;
     TileCatalog catalog;
     const std::string repo_root = ResolveWorkspacePath(".");
@@ -2564,7 +2564,7 @@ int main(int, char**) {
     std::string shader_world_frag = ResolveRepoPath("shaders/world.frag.spv");
     std::string shader_pick_vert = ResolveRepoPath("shaders/pick.vert.spv");
     std::string shader_pick_frag = ResolveRepoPath("shaders/pick.frag.spv");
-    std::string ground_texture = ResolveRepoPath("assets/textures/raid_ground.png");
+    std::string ground_texture = ResolveWorkspacePath("Assets/textures/raid_ground.png");
 
     if (!FileExists(shader_world_vert))
         fprintf(stderr, "Missing shader: %s\n", shader_world_vert.c_str());
