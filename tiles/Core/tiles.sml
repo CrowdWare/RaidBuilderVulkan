@@ -50,6 +50,7 @@ Tile {
     texture: "res://assets/textures/raid_spawn.png"
     model: "../build/blocks_cache/block.glb"
     material: texture
+    collision: false
 }
 
 Tile {
@@ -59,4 +60,5 @@ Tile {
     model: "Assets/characters/Paladin.gltf#Paladin_J_Nordstrom_Helmet#Paladin_J_Nordstrom"
     animation: "Assets/animations/idle.glb"
     material: skinned
+    collision: false
 }
