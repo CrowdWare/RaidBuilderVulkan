@@ -933,10 +933,18 @@ static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
     return (eff_cm + denom - 1) / denom;
 }
 
+struct SpawnPoint {
+    bool valid = false;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
 static bool ParseDungeon(const std::string& text,
                          float block_size,
                          std::vector<voxel::VoxelRenderer::Block>* out_blocks,
                          std::vector<TileDef>* out_tiles,
+                         SpawnPoint* out_spawn,
                          std::string* error_message) {
     class DungeonHandler : public sml::SmlHandler {
     public:
@@ -1002,9 +1010,16 @@ static bool ParseDungeon(const std::string& text,
 
     if (out_tiles)
         *out_tiles = handler.tiles;
+    if (out_spawn)
+        *out_spawn = SpawnPoint();
 
     if (handler.lines.empty()) {
-        out_blocks->clear();
+        if (out_blocks)
+            out_blocks->clear();
+        if (out_spawn)
+            out_spawn->valid = false;
+        if (error_message)
+            *error_message = "Spawn marker error: expected 1 spawn tile, found 0";
         return true;
     }
 
@@ -1047,6 +1062,9 @@ static bool ParseDungeon(const std::string& text,
     }
 
     std::vector<int> row_counts(layer_rows.size(), 0);
+    const float offset_x = block_size * 0.5f;
+    const float offset_z = block_size * 0.5f;
+    size_t spawn_count = 0;
     for (size_t layer = 0; layer < layer_rows.size(); ++layer) {
         const std::vector<std::vector<std::string> >& rows = layer_rows[layer];
         for (size_t r = 0; r < rows.size(); ++r) {
@@ -1059,6 +1077,15 @@ static bool ParseDungeon(const std::string& text,
                 if (colon != std::string::npos) {
                     id = raw.substr(0, colon);
                     suffix = raw.substr(colon + 1);
+                }
+                if (id == "S") {
+                    spawn_count += 1;
+                    if (out_spawn) {
+                        out_spawn->x = col * block_size + offset_x;
+                        out_spawn->y = (float)layer * block_size + block_size * 0.5f;
+                        out_spawn->z = row_counts[layer] * block_size + offset_z;
+                    }
+                    continue;
                 }
                 if (!handler.tiles.empty() && tex_index_map.find(id) == tex_index_map.end())
                     continue;
@@ -1087,12 +1114,17 @@ static bool ParseDungeon(const std::string& text,
         if (row_counts[i] > max_rows)
             max_rows = row_counts[i];
 
-    float offset_x = block_size * 0.5f;
-    float offset_z = block_size * 0.5f;
     for (size_t i = 0; i < blocks.size(); ++i) {
         blocks[i].x = blocks[i].x * block_size + offset_x;
         blocks[i].z = blocks[i].z * block_size + offset_z;
         blocks[i].y = blocks[i].y * block_size + block_size * 0.5f;
+    }
+
+    if (out_spawn)
+        out_spawn->valid = (spawn_count == 1);
+    if (spawn_count != 1) {
+        if (error_message)
+            *error_message = std::string("Spawn marker error: expected 1 spawn tile, found ") + std::to_string(spawn_count);
     }
 
     *out_blocks = blocks;
@@ -1850,10 +1882,13 @@ int main(int, char**) {
         fprintf(stderr, "Tile catalog parse error: %s\n", catalog_error.c_str());
     std::string dungeon_text;
     std::string dungeon_error;
+    SpawnPoint dungeon_spawn;
     if (!LoadFileText(current_dungeon_path.c_str(), &dungeon_text)) {
         fprintf(stderr, "Dungeon load error: could not read %s\n", current_dungeon_path.c_str());
-    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &dungeon_tiles, &dungeon_error)) {
+    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &dungeon_tiles, &dungeon_spawn, &dungeon_error)) {
         fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
+    } else if (!dungeon_spawn.valid) {
+        fprintf(stderr, "%s\n", dungeon_error.c_str());
     }
     if (catalog_ok && !catalog.tiles.empty()) {
         tiles = catalog.tiles;
@@ -2090,10 +2125,10 @@ int main(int, char**) {
     double last_mouse_x = 0.0;
     double last_mouse_y = 0.0;
     bool first_mouse = true;
-    float camera_x = 6.0f;
-    float camera_z = 6.0f;
     const float eye_height = 1.6f;
-    float camera_y = eye_height;
+    float camera_x = dungeon_spawn.valid ? dungeon_spawn.x : 6.0f;
+    float camera_z = dungeon_spawn.valid ? dungeon_spawn.z : 6.0f;
+    float camera_y = dungeon_spawn.valid ? (dungeon_spawn.y + eye_height) : eye_height;
     float vertical_velocity = 0.0f;
     float camera_yaw = 3.1415926f * 0.75f;
     float camera_pitch = -0.5f;
