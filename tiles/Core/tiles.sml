@@ -56,8 +56,10 @@ Tile {
     key: "E"
     name: "Enemy"
     icon: "res://assets/textures/raid_enemy.png"
-    texture: "Assets/textures/Paladin_diffuse.png"
-    model: "Assets/characters/Paladin.glb#Paladin_J_Nordstrom_Helmet"
+    diffuse: "Assets/textures/Paladin_diffuse.png"
+    normal: "Assets/textures/Paladin_normal.png"
+    specular: "Assets/textures/Paladin_specular.png"
+    model: "Assets/characters/Paladin.gltf#Paladin_J_Nordstrom_Helmet#Paladin_J_Nordstrom"
     animation: "Assets/animations/idle.glb"
-    material: texture
+    material: skinned
 }
