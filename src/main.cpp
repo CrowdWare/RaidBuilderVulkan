@@ -543,6 +543,13 @@ static std::string GetActionBarPath() {
     return GetStateDir() + "/actionbar.cfg";
 }
 
+enum MenuActionId {
+    MENU_ACTION_OPEN = 1001,
+    MENU_ACTION_SAVE = 1002,
+    MENU_ACTION_SAVE_AS = 1003,
+    MENU_ACTION_CLOSE_QUERY = 1099
+};
+
 static void LoadActionBar(const std::string& path,
                           const std::map<std::string, int>& tile_index_by_key,
                           std::vector<int>* action_slots,
@@ -1879,6 +1886,13 @@ int main(int, char**) {
     if (ui_window.state.last_file_path && !saved_state.last_file_path.empty() && FileExists(saved_state.last_file_path)) {
         current_dungeon_path = saved_state.last_file_path;
     }
+    int pending_menu_action = 0;
+    auto menu_action_handler = [](int action_id, void* user_data) {
+        if (!user_data)
+            return;
+        *static_cast<int*>(user_data) = action_id;
+    };
+    ui_document.setMenuActionCallback(menu_action_handler, &pending_menu_action);
     const float block_size = 0.6f;
     std::vector<voxel::VoxelRenderer::Block> dungeon_blocks;
     std::vector<unsigned char> selected_flags;
@@ -2029,7 +2043,7 @@ int main(int, char**) {
     }
 
 #if defined(__APPLE__)
-    BuildMacMainMenu(window, ui_window);
+    BuildMacMainMenu(window, ui_window, menu_action_handler, &pending_menu_action);
 #endif
 
     ImVector<const char*> extensions;
@@ -2365,6 +2379,32 @@ int main(int, char**) {
             inv_was_down = false;
             for (int i = 0; i < 10; ++i)
                 slot_was_down[i] = false;
+        }
+
+        if (pending_menu_action != 0) {
+            int action_id = pending_menu_action;
+            pending_menu_action = 0;
+            if (action_id == MENU_ACTION_SAVE) {
+                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
+                    saved_state.last_file_path = current_dungeon_path;
+                    SaveAppState(state_path, saved_state);
+                    dirty = false;
+                    UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+                }
+            } else if (action_id == MENU_ACTION_SAVE_AS) {
+                // TODO: Replace with native file dialog when available.
+                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
+                    saved_state.last_file_path = current_dungeon_path;
+                    SaveAppState(state_path, saved_state);
+                    dirty = false;
+                    UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+                }
+            } else if (action_id == MENU_ACTION_OPEN) {
+                // TODO: Replace with native file dialog when available.
+                fprintf(stderr, "Menu action: open (not implemented)\n");
+            } else if (action_id == MENU_ACTION_CLOSE_QUERY) {
+                close_pending = true;
+            }
         }
 
         int active_tile_index = 0;
