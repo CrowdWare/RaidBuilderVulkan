@@ -1407,7 +1407,6 @@ static bool ParseDungeon(const std::string& text,
                         out_spawn->y = (float)layer * block_size + block_size * 0.5f;
                         out_spawn->z = row_counts[layer] * block_size + offset_z;
                     }
-                    continue;
                 }
                 if (!handler.tiles.empty() && tex_index_map.find(id) == tex_index_map.end())
                     continue;
@@ -2685,12 +2684,16 @@ int main(int, char**) {
     std::unordered_set<long long> solid_blocks;
     solid_blocks.reserve(dungeon_blocks.size());
     for (size_t i = 0; i < dungeon_blocks.size(); ++i) {
+        if (dungeon_blocks[i].key == "S")
+            continue;
         int wx = (int)std::round(dungeon_blocks[i].x / block_size - 0.5f);
         int wy = (int)std::round(dungeon_blocks[i].y / block_size - 0.5f);
         int wz = (int)std::round(dungeon_blocks[i].z / block_size - 0.5f);
         solid_blocks.insert(BlockKey(wx, wy, wz));
     }
     auto add_solid_block = [&](const voxel::VoxelRenderer::Block& block) {
+        if (block.key == "S")
+            return;
         int wx = (int)std::round(block.x / block_size - 0.5f);
         int wy = (int)std::round(block.y / block_size - 0.5f);
         int wz = (int)std::round(block.z / block_size - 0.5f);
