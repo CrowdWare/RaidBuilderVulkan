@@ -25,6 +25,7 @@
 #include "sml_ui.h"
 #include "sml_parser.h"
 #include "voxel_renderer.h"
+#include "voxel_character_controller.h"
 #include "rotation_controls.h"
 
 #include <stdio.h>
@@ -35,6 +36,7 @@
 #include <cmath>
 #include <map>
 #include <algorithm>
+#include <unordered_set>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <cerrno>
@@ -51,6 +53,15 @@
 #endif
 
 #define PI_F 3.1415926f
+
+static long long BlockKey(int x, int y, int z) {
+    constexpr int kOffset = 1 << 20;
+    constexpr long long kMask = (1LL << 21) - 1;
+    long long xx = static_cast<long long>(x + kOffset) & kMask;
+    long long yy = static_cast<long long>(y + kOffset) & kMask;
+    long long zz = static_cast<long long>(z + kOffset) & kMask;
+    return (xx << 42) | (yy << 21) | zz;
+}
 
 struct Mat4 {
     float m[16];
@@ -2129,13 +2140,13 @@ int main(int, char**) {
     float camera_x = dungeon_spawn.valid ? dungeon_spawn.x : 6.0f;
     float camera_z = dungeon_spawn.valid ? dungeon_spawn.z : 6.0f;
     float camera_y = dungeon_spawn.valid ? (dungeon_spawn.y + eye_height) : eye_height;
-    float vertical_velocity = 0.0f;
     float camera_yaw = 3.1415926f * 0.75f;
     float camera_pitch = -0.5f;
     bool f_was_down = false;
     bool e_was_down = false;
     bool q_was_down = false;
     bool g_was_down = false;
+    bool c_was_down = false;
     bool esc_was_down = false;
     bool inv_was_down = false;
     bool save_was_down = false;
@@ -2143,6 +2154,7 @@ int main(int, char**) {
     bool left_was_down = false;
     bool suppress_backward = false;
     bool gravity_enabled = true;
+    bool collision_enabled = true;
     bool painting = false;
     bool ghost_hover_last = false;
     int paint_count = 0;
@@ -2173,6 +2185,76 @@ int main(int, char**) {
     const int max_paint_blocks = 30; // TODO: make configurable.
     const float max_place_distance = 30.0f;
     double last_time = glfwGetTime();
+
+    voxel::CharacterConfig character_config;
+    character_config.height = 1.7f;
+    character_config.radius = 0.25f;
+    character_config.block_size = block_size;
+    character_config.can_toggle_gravity_mode = true;
+    character_config.can_toggle_collision = true;
+    voxel::CharacterController character(character_config);
+    std::unordered_set<long long> solid_blocks;
+    solid_blocks.reserve(dungeon_blocks.size());
+    for (size_t i = 0; i < dungeon_blocks.size(); ++i) {
+        int wx = (int)std::round(dungeon_blocks[i].x / block_size - 0.5f);
+        int wy = (int)std::round(dungeon_blocks[i].y / block_size - 0.5f);
+        int wz = (int)std::round(dungeon_blocks[i].z / block_size - 0.5f);
+        solid_blocks.insert(BlockKey(wx, wy, wz));
+    }
+    auto add_solid_block = [&](const voxel::VoxelRenderer::Block& block) {
+        int wx = (int)std::round(block.x / block_size - 0.5f);
+        int wy = (int)std::round(block.y / block_size - 0.5f);
+        int wz = (int)std::round(block.z / block_size - 0.5f);
+        solid_blocks.insert(BlockKey(wx, wy, wz));
+    };
+    auto remove_solid_block = [&](const voxel::VoxelRenderer::Block& block) {
+        int wx = (int)std::round(block.x / block_size - 0.5f);
+        int wy = (int)std::round(block.y / block_size - 0.5f);
+        int wz = (int)std::round(block.z / block_size - 0.5f);
+        solid_blocks.erase(BlockKey(wx, wy, wz));
+    };
+    auto is_overlapping_solid = [&](const voxel::Vec3& pos) {
+        const float half_height = std::max(character_config.height * 0.5f - character_config.radius, 0.0f);
+        const float radius = character_config.radius + character_config.skin;
+        const float min_x = pos.x - radius;
+        const float max_x = pos.x + radius;
+        const float min_y = pos.y - half_height - radius;
+        const float max_y = pos.y + half_height + radius;
+        const float min_z = pos.z - radius;
+        const float max_z = pos.z + radius;
+        const int min_ix = (int)std::floor(min_x / block_size);
+        const int max_ix = (int)std::floor(max_x / block_size);
+        const int min_iy = (int)std::floor(min_y / block_size);
+        const int max_iy = (int)std::floor(max_y / block_size);
+        const int min_iz = (int)std::floor(min_z / block_size);
+        const int max_iz = (int)std::floor(max_z / block_size);
+        for (int iz = min_iz; iz <= max_iz; ++iz) {
+            for (int iy = min_iy; iy <= max_iy; ++iy) {
+                for (int ix = min_ix; ix <= max_ix; ++ix) {
+                    if (solid_blocks.find(BlockKey(ix, iy, iz)) != solid_blocks.end())
+                        return true;
+                }
+            }
+        }
+        return false;
+    };
+    auto resolve_collision_overlap = [&](voxel::Vec3* pos) {
+        if (!pos)
+            return;
+        if (!is_overlapping_solid(*pos))
+            return;
+        for (int i = 0; i < 20; ++i) {
+            pos->y += block_size;
+            if (!is_overlapping_solid(*pos))
+                return;
+        }
+    };
+    character.setSolidQuery([&solid_blocks](int ix, int iy, int iz) {
+        return solid_blocks.find(BlockKey(ix, iy, iz)) != solid_blocks.end();
+    });
+    character.setPosition({camera_x, camera_y - (eye_height - character_config.height * 0.5f), camera_z});
+    character.setCollisionEnabled(collision_enabled);
+    character.setGravityEnabled(gravity_enabled);
 
     ImVec4 clear_color = ImVec4(0.18f, 0.35f, 0.75f, 1.00f);
 
@@ -2382,67 +2464,93 @@ int main(int, char**) {
         if (!edit_mode) {
             bool controls_blocked = (inventory_open && !close_dialog_active) || rotation_anim_active;
             if (!controls_blocked) {
-                if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
-                    camera_x += forward_x * speed * dt;
-                    camera_z += forward_z * speed * dt;
-                }
-                if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
-                    if (!suppress_backward) {
-                        camera_x -= forward_x * speed * dt;
-                        camera_z -= forward_z * speed * dt;
-                    }
-                }
-                if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
-                    camera_x -= right_x * speed * dt;
-                    camera_z -= right_z * speed * dt;
-                }
-                if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
-                    camera_x += right_x * speed * dt;
-                    camera_z += right_z * speed * dt;
-                }
-
                 bool e_down = (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
                 bool q_down = (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
-                if (e_down && q_down) {
-                    gravity_enabled = true;
-                    vertical_velocity = 0.0f;
-                } else if (e_down && !e_was_down) {
-                    gravity_enabled = false;
-                    vertical_velocity = 0.0f;
-                }
+                bool c_down = (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS);
 
-                if (gravity_enabled) {
-                    const float gravity = -9.8f;
-                    vertical_velocity += gravity * dt;
-                    camera_y += vertical_velocity * dt;
-                    if (camera_y < eye_height) {
-                        camera_y = eye_height;
-                        vertical_velocity = 0.0f;
+                if (character_config.can_toggle_gravity_mode) {
+                    if (e_down && q_down) {
+                        gravity_enabled = true;
+                    } else if ((e_down || q_down) && !(e_was_down || q_was_down)) {
+                        gravity_enabled = false;
                     }
                 }
+                const bool step_up = !gravity_enabled && e_down && !e_was_down;
+                const bool step_down = !gravity_enabled && q_down && !q_was_down;
+                if (character_config.can_toggle_collision && c_down && !c_was_down) {
+                    collision_enabled = !collision_enabled;
+                    if (collision_enabled) {
+                        voxel::Vec3 pos = character.position();
+                        resolve_collision_overlap(&pos);
+                        character.setPosition(pos);
+                        character.setVelocity(voxel::Vec3(0.0f, 0.0f, 0.0f));
+                    }
+                }
+                c_was_down = c_down;
+                e_was_down = e_down;
+                q_was_down = q_down;
 
-                if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && camera_y <= eye_height + 0.001f) {
-                    float jump_speed = std::sqrt(2.0f * 9.8f * block_size);
-                    vertical_velocity = jump_speed;
+                character.setGravityEnabled(gravity_enabled);
+                character.setCollisionEnabled(collision_enabled);
+
+                const bool forward_key = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+                const bool back_key = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+                const bool left_key = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+                const bool right_key = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+                const bool jump_key = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
+
+                voxel::CharacterInput character_input;
+                float move_x = 0.0f;
+                float move_z = 0.0f;
+                if (forward_key)
+                    move_x += forward_x, move_z += forward_z;
+                if (back_key && !suppress_backward)
+                    move_x -= forward_x, move_z -= forward_z;
+                if (left_key)
+                    move_x -= right_x, move_z -= right_z;
+                if (right_key)
+                    move_x += right_x, move_z += right_z;
+                float len = std::sqrt(move_x * move_x + move_z * move_z);
+                if (len > 0.0001f) {
+                    move_x /= len;
+                    move_z /= len;
                 }
 
-                if (e_down) {
-                    if (!e_was_down)
-                        camera_y += block_size;
-                    e_was_down = true;
+                const float accel = speed * 8.0f;
+                if (forward_key || back_key || left_key || right_key) {
+                    character_input.accel_x = move_x * accel;
+                    character_input.accel_z = move_z * accel;
                 } else {
-                    e_was_down = false;
+                    const voxel::Vec3 vel = character.velocity();
+                    character_input.accel_x = -vel.x * 6.0f;
+                    character_input.accel_z = -vel.z * 6.0f;
                 }
-                if (q_down) {
-                    if (!q_was_down)
-                        camera_y -= block_size;
-                    q_was_down = true;
-                } else {
-                    q_was_down = false;
+
+                character_input.jump = gravity_enabled && jump_key;
+                character.update(dt, character_input);
+                voxel::Vec3 pos = character.position();
+                voxel::Vec3 vel = character.velocity();
+                if (!gravity_enabled) {
+                    vel.y = 0.0f;
+                    if (step_up)
+                        pos.y += block_size;
+                    if (step_down)
+                        pos.y -= block_size;
                 }
+                const float min_center_y = character_config.height * 0.5f;
+                if (pos.y < min_center_y) {
+                    pos.y = min_center_y;
+                    vel.y = 0.0f;
+                }
+                character.setPosition(pos);
+                character.setVelocity(vel);
+                camera_x = pos.x;
+                camera_y = pos.y + (eye_height - character_config.height * 0.5f);
+                camera_z = pos.z;
             } else {
                 e_was_down = false;
                 q_was_down = false;
+                c_was_down = false;
             }
         } else {
             // Selection handling moved after UI so we can honor hovered UI windows.
@@ -2625,6 +2733,7 @@ int main(int, char**) {
 
             if (!close_dialog_active && left_state == GLFW_PRESS && !left_was_down && hover_has_block && hover_block_index >= 0 &&
                 hover_block_index < (int)dungeon_blocks.size()) {
+                remove_solid_block(dungeon_blocks[hover_block_index]);
                 dungeon_blocks.erase(dungeon_blocks.begin() + hover_block_index);
                 selected_flags.assign(dungeon_blocks.size(), 0);
                 g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
@@ -2664,6 +2773,7 @@ int main(int, char**) {
                                 new_block.key = active_tile_key;
                                 new_block.mesh_index = active_mesh_index;
                                 dungeon_blocks.push_back(new_block);
+                                add_solid_block(new_block);
                                 selected_flags.assign(dungeon_blocks.size(), 0);
                                 selected_flags.back() = 1;
                                 g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
@@ -2715,6 +2825,7 @@ int main(int, char**) {
                             new_block.key = active_tile_key;
                             new_block.mesh_index = active_mesh_index;
                             dungeon_blocks.push_back(new_block);
+                            add_solid_block(new_block);
                             selected_flags.assign(dungeon_blocks.size(), 0);
                             selected_flags.back() = 1;
                             g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
@@ -2763,6 +2874,7 @@ int main(int, char**) {
                     new_block.key = active_tile_key;
                     new_block.mesh_index = active_mesh_index;
                     dungeon_blocks.push_back(new_block);
+                    add_solid_block(new_block);
                     selected_flags.assign(dungeon_blocks.size(), 0);
                     selected_flags.back() = 1;
                     g_VoxelRenderer.setBlocks(dungeon_blocks, block_size);
