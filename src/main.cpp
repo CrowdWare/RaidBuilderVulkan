@@ -43,7 +43,7 @@
 #else
 #include <dirent.h>
 #endif
-#include "gltf_loader.h"
+#include "tile_catalog.h"
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <unistd.h>
@@ -521,20 +521,7 @@ static void SaveAppState(const std::string& path, const AppState& state) {
         file << "lastFilePath=" << state.last_file_path << "\n";
 }
 
-struct TileDef {
-    std::string key;
-    std::string name;
-    std::string icon;
-    std::string texture;
-    std::string model;
-    std::string type = "block"; // block | prop
-    int height_cm = 60;
-    int scale_percent = 100;
-    int height_blocks = 1;
-    std::string material;
-    std::string placement;
-    std::string category;
-};
+using ::TileDef;
 
 // Forward declarations for path resolution helpers used by the tile catalog loader.
 static std::string ResolveRepoDir(const std::string& rel);
@@ -597,147 +584,6 @@ static void SaveActionBar(const std::string& path,
     }
 }
 
-static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
-    if (height_cm <= 0)
-        height_cm = block_cm;
-    if (scale_percent <= 0)
-        scale_percent = 100;
-    int eff_cm = height_cm * scale_percent;
-    int denom = block_cm * 100;
-    if (denom <= 0)
-        denom = 1;
-    return (eff_cm + denom - 1) / denom;
-}
-
-static bool ParseTilesFile(const std::string& path,
-                           const std::string& category,
-                           std::vector<TileDef>* out_tiles,
-                           std::string* error_message) {
-    if (!out_tiles)
-        return false;
-    std::string text;
-    if (!LoadFileText(path.c_str(), &text)) {
-        if (error_message)
-            *error_message = "Could not read tiles file";
-        return false;
-    }
-
-    class TilesHandler : public sml::SmlHandler {
-    public:
-        std::vector<std::string> stack;
-        TileDef tile;
-        std::vector<TileDef> tiles;
-        std::string category;
-
-        explicit TilesHandler(const std::string& cat) : category(cat) {}
-
-        void startElement(const std::string& name) override { stack.push_back(name); }
-        void onProperty(const std::string& name, const sml::PropertyValue& value) override {
-            if (stack.empty() || stack.back() != "Tile")
-                return;
-            if (name == "key" && value.type == sml::PropertyValue::String)
-                tile.key = value.string_value;
-            else if (name == "name" && value.type == sml::PropertyValue::String)
-                tile.name = value.string_value;
-            else if (name == "icon" && value.type == sml::PropertyValue::String)
-                tile.icon = value.string_value;
-            else if (name == "texture" && value.type == sml::PropertyValue::String)
-                tile.texture = value.string_value;
-            else if (name == "model" && value.type == sml::PropertyValue::String)
-                tile.model = value.string_value;
-            else if (name == "type" && value.type == sml::PropertyValue::String)
-                tile.type = value.string_value;
-            else if (name == "material" && value.type == sml::PropertyValue::EnumType)
-                tile.material = value.string_value;
-            else if (name == "placement" && value.type == sml::PropertyValue::EnumType)
-                tile.placement = value.string_value;
-            else if (name == "height_cm" && value.type == sml::PropertyValue::Int)
-                tile.height_cm = value.int_value;
-            else if (name == "scale_percent" && value.type == sml::PropertyValue::Int)
-                tile.scale_percent = value.int_value;
-        }
-        void endElement(const std::string& name) override {
-            if (name == "Tile") {
-                if (!tile.key.empty()) {
-                    tile.category = category;
-                    tile.height_blocks = ComputeHeightBlocks(tile.height_cm, tile.scale_percent, 60);
-                    tiles.push_back(tile);
-                }
-                tile = TileDef();
-            }
-            if (!stack.empty())
-                stack.pop_back();
-        }
-    };
-
-    TilesHandler handler(category);
-    try {
-        sml::SmlSaxParser parser(text);
-        parser.registerEnumValue("material", "texture");
-        parser.registerEnumValue("material", "vertex");
-        parser.registerEnumValue("placement", "ground");
-        parser.registerEnumValue("placement", "wall");
-        parser.registerEnumValue("placement", "ceiling");
-        parser.parse(handler);
-    } catch (const sml::SmlParseException& e) {
-        if (error_message)
-            *error_message = e.what();
-        return false;
-    }
-
-    out_tiles->insert(out_tiles->end(), handler.tiles.begin(), handler.tiles.end());
-    return true;
-}
-
-static std::vector<std::string> ListSubdirs(const std::string& root_dir) {
-    std::vector<std::string> dirs;
-#if defined(_WIN32)
-    (void)root_dir;
-    return dirs;
-#else
-    DIR* dir = opendir(root_dir.c_str());
-    if (!dir)
-        return dirs;
-    struct dirent* ent = nullptr;
-    while ((ent = readdir(dir)) != nullptr) {
-        std::string name = ent->d_name;
-        if (name.empty() || name == "." || name == "..")
-            continue;
-        std::string full = root_dir + "/" + name;
-        if (DirExists(full))
-            dirs.push_back(full);
-    }
-    closedir(dir);
-    std::sort(dirs.begin(), dirs.end());
-#endif
-    return dirs;
-}
-
-static std::vector<TileDef> LoadTileCatalog(std::string* error_message) {
-    std::vector<TileDef> tiles;
-    std::string tiles_root = ResolveRepoDir("tiles");
-    if (tiles_root.empty())
-        tiles_root = ResolveWorkspacePath("RaidBuilder/tiles");
-    if (tiles_root.empty() || !DirExists(tiles_root))
-        return tiles;
-
-    std::vector<std::string> categories = ListSubdirs(tiles_root);
-    for (size_t i = 0; i < categories.size(); ++i) {
-        const std::string& cat_dir = categories[i];
-        size_t slash = cat_dir.find_last_of('/');
-        std::string cat_name = (slash == std::string::npos) ? cat_dir : cat_dir.substr(slash + 1);
-        std::string tiles_file = cat_dir + "/tiles.sml";
-        if (!FileExists(tiles_file))
-            continue;
-        std::string err;
-        if (!ParseTilesFile(tiles_file, cat_name, &tiles, &err)) {
-            if (error_message && error_message->empty())
-                *error_message = err;
-            fprintf(stderr, "Tile catalog error in %s: %s\n", tiles_file.c_str(), err.c_str());
-        }
-    }
-    return tiles;
-}
 
 static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block>& blocks,
                                    float block_size,
@@ -959,12 +805,20 @@ static std::string ResolveRepoDir(const std::string& rel) {
 }
 
 static std::string ResolveWorkspacePath(const std::string& rel) {
+    if (DirExists("RaidBuilder")) {
+        if (rel.empty())
+            return ".";
+        return std::string("./") + rel;
+    }
     std::string exe_dir = GetExecutableDir();
     std::string dir = exe_dir;
-    for (int i = 0; i < 6; ++i) {
-        std::string candidate = dir + "/" + rel;
-        if (FileExists(candidate))
-            return candidate;
+    for (int i = 0; i < 8; ++i) {
+        std::string marker = dir + "/RaidBuilder";
+        if (DirExists(marker)) {
+            if (rel.empty())
+                return dir;
+            return dir + "/" + rel;
+        }
         size_t slash = dir.find_last_of('/');
         if (slash == std::string::npos)
             break;
@@ -973,12 +827,6 @@ static std::string ResolveWorkspacePath(const std::string& rel) {
     return rel;
 }
 
-static std::string StripResPrefix(const std::string& path) {
-    const std::string prefix = "res://";
-    if (path.compare(0, prefix.size(), prefix) == 0)
-        return path.substr(prefix.size());
-    return path;
-}
 
 static bool EndsWith(const std::string& s, const std::string& suffix) {
     if (suffix.size() > s.size())
@@ -986,50 +834,18 @@ static bool EndsWith(const std::string& s, const std::string& suffix) {
     return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
 }
 
-static std::string NormalizeTileModel(const std::string& model_in) {
+static bool IsSymmetricTileModel(const std::string& model_in) {
     std::string model = model_in;
     if (model.empty())
-        return "block.glb";
+        model = "block.glb";
     if (model.compare(0, 8, "texture:") == 0)
-        return "block.glb";
-    model = StripResPrefix(model);
-    return model.empty() ? "block.glb" : model;
-}
-
-static bool IsSymmetricTileModel(const std::string& model_in) {
-    std::string model = NormalizeTileModel(model_in);
+        model = "block.glb";
+    const std::string prefix = "res://";
+    if (model.compare(0, prefix.size(), prefix) == 0)
+        model = model.substr(prefix.size());
+    if (model.empty())
+        model = "block.glb";
     return model == "block.glb" || EndsWith(model, "/block.glb") || EndsWith(model, "\\block.glb");
-}
-
-static std::string ResolveModelPath(const std::string& path) {
-    if (path.empty())
-        return path;
-    if (path[0] == '/') 
-        return path;
-    // If a relative path is provided (e.g. ../build/blocks_cache/foo.glb),
-    // resolve it against the workspace/app layout first.
-    if (path[0] == '.' || path.find('/') != std::string::npos || path.find('\\') != std::string::npos) {
-        std::string candidate = ResolveWorkspacePath(path);
-        if (FileExists(candidate))
-            return candidate;
-        candidate = ResolveRepoPath(path);
-        if (FileExists(candidate))
-            return candidate;
-        return path;
-    }
-    std::string exe_dir = GetExecutableDir();
-#if defined(__APPLE__)
-    std::string bundle_candidate = exe_dir + "/../Resources/build/blocks_cache/" + path;
-    if (FileExists(bundle_candidate))
-        return bundle_candidate;
-#endif
-    std::string candidate = ResolveWorkspacePath(std::string("build/blocks_cache/") + path);
-    if (FileExists(candidate))
-        return candidate;
-    candidate = ResolveRepoPath(std::string("assets/blocks/") + path);
-    if (FileExists(candidate))
-        return candidate;
-    return path;
 }
 
 static bool ParseRotationSuffix(const std::string& suffix,
@@ -1103,6 +919,18 @@ static bool ParseRotationSuffix(const std::string& suffix,
     }
 
     return true;
+}
+
+static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
+    if (height_cm <= 0)
+        height_cm = block_cm;
+    if (scale_percent <= 0)
+        scale_percent = 100;
+    int eff_cm = height_cm * scale_percent;
+    int denom = block_cm * 100;
+    if (denom <= 0)
+        denom = 1;
+    return (eff_cm + denom - 1) / denom;
 }
 
 static bool ParseDungeon(const std::string& text,
@@ -2015,7 +1843,9 @@ int main(int, char**) {
     std::vector<TileDef> dungeon_tiles;
     std::string default_texture_path = "assets/textures/raid_stone.png";
     std::string catalog_error;
-    std::vector<TileDef> catalog_tiles = LoadTileCatalog(&catalog_error);
+    TileCatalog catalog;
+    const std::string repo_root = ResolveWorkspacePath(".");
+    const bool catalog_ok = LoadTileCatalog(repo_root, "RaidBuilder/tiles", default_texture_path, &catalog, &catalog_error);
     if (!catalog_error.empty())
         fprintf(stderr, "Tile catalog parse error: %s\n", catalog_error.c_str());
     std::string dungeon_text;
@@ -2025,8 +1855,8 @@ int main(int, char**) {
     } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &dungeon_tiles, &dungeon_error)) {
         fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
     }
-    if (!catalog_tiles.empty()) {
-        tiles = catalog_tiles;
+    if (catalog_ok && !catalog.tiles.empty()) {
+        tiles = catalog.tiles;
         std::map<std::string, size_t> by_key;
         for (size_t i = 0; i < tiles.size(); ++i)
             by_key[tiles[i].key] = i;
@@ -2057,61 +1887,47 @@ int main(int, char**) {
         tiles.push_back(tile);
     }
 
-    std::vector<voxel::VoxelRenderer::MeshData> tile_meshes;
-    std::vector<bool> tile_mesh_has_uv;
-    tile_meshes.reserve(tiles.size());
-    tile_mesh_has_uv.reserve(tiles.size());
-    for (size_t i = 0; i < tiles.size(); ++i) {
-        std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
-        if (model.compare(0, 8, "texture:") == 0) {
-            std::string tex_from_model = StripResPrefix(model.substr(8));
-            if (!tex_from_model.empty())
-                tiles[i].texture = tex_from_model;
-            model = "block.glb";
+    TileCatalog merged_catalog = catalog;
+    if (!tiles.empty()) {
+        std::map<std::string, TileDef> overrides;
+        for (size_t i = 0; i < dungeon_tiles.size(); ++i) {
+            if (!dungeon_tiles[i].key.empty())
+                overrides[dungeon_tiles[i].key] = dungeon_tiles[i];
         }
-        model = NormalizeTileModel(model);
-        std::string model_path = ResolveModelPath(model);
-        GltfMesh mesh;
-        std::string mesh_error;
-        if (LoadGltfMesh(model_path, &mesh, &mesh_error)) {
-            tile_meshes.push_back(mesh.mesh);
-            tile_mesh_has_uv.push_back(mesh.has_uv);
-        } else {
-            if (!mesh_error.empty())
-                fprintf(stderr, "Failed to load model %s: %s\n", model_path.c_str(), mesh_error.c_str());
-            else
-                fprintf(stderr, "Failed to load model %s\n", model_path.c_str());
-            tile_meshes.push_back(voxel::VoxelRenderer::MeshData());
-            tile_mesh_has_uv.push_back(false);
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            std::map<std::string, TileDef>::const_iterator it = overrides.find(tiles[i].key);
+            if (it != overrides.end()) {
+                TileDef merged = it->second;
+                if (merged.category.empty())
+                    merged.category = tiles[i].category;
+                tiles[i] = merged;
+            }
         }
+        merged_catalog.tiles = tiles;
+        std::vector<TileDef> merged_tiles = merged_catalog.tiles;
+        if (!PopulateTileResources(repo_root, default_texture_path, &merged_tiles, &merged_catalog)) {
+            fprintf(stderr, "Failed to populate tile resources\n");
+        }
+        merged_catalog.tiles = merged_tiles;
     }
 
-    std::vector<std::string> block_texture_paths;
-    block_texture_paths.reserve(tiles.size());
-    for (size_t i = 0; i < tiles.size(); ++i) {
-        std::string tex = tiles[i].texture.empty() ? default_texture_path : tiles[i].texture;
-        tex = StripResPrefix(tex);
-        std::string resolved = ResolveRepoPath(tex);
-        if (!FileExists(resolved)) {
-            std::string fallback = ResolveRepoPath(default_texture_path);
-            fprintf(stderr, "Missing tile texture: %s (tile '%s'), using %s\n",
-                    resolved.c_str(), tiles[i].key.c_str(), fallback.c_str());
-            resolved = fallback;
-        }
-        block_texture_paths.push_back(resolved);
-    }
+    std::vector<voxel::VoxelRenderer::MeshData> tile_meshes = merged_catalog.meshes;
+    std::vector<bool> tile_mesh_has_uv = merged_catalog.mesh_has_uv;
+    std::vector<std::string> block_texture_paths = merged_catalog.texture_paths;
+    if (block_texture_paths.empty())
+        fprintf(stderr, "RaidBuilder: tile catalog has no textures\n");
 
     auto tile_tex_index_for = [&](size_t index) -> int {
         if (index >= tiles.size())
+            return -2;
+        if (index >= tile_mesh_has_uv.size())
             return -2;
         if (tiles[index].texture.empty() || !tile_mesh_has_uv[index])
             return -2;
         return (int)index;
     };
 
-    std::map<std::string, int> tile_index_by_key;
-    for (size_t i = 0; i < tiles.size(); ++i)
-        tile_index_by_key[tiles[i].key] = (int)i;
+    std::map<std::string, int> tile_index_by_key = merged_catalog.index_by_key;
     std::vector<bool> tile_is_symmetric;
     tile_is_symmetric.resize(tiles.size(), false);
     for (size_t i = 0; i < tiles.size(); ++i)
