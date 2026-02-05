@@ -19,22 +19,24 @@ Window {
 
             MenuItem {
                 label: "Open"
+                action: open
                 
             }
             Separator {}
             MenuItem {
                 label: "Save"
+                action: save
                 
             }
             MenuItem {
                 label: "Save As"
-                
+                action: saveAs
             }
             Separator {}
             MenuItem {
                 label: "Exit"
                 clicked: "exit"
-                
+                action: closeQuery
                 useOnMac: false
             }
         }
