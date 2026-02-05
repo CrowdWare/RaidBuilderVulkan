@@ -41,6 +41,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <cerrno>
+#include <chrono>
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
@@ -72,6 +73,10 @@ static bool IsDebugEnabled(const char* env_name) {
     std::string v(value);
     std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
     return v == "1" || v == "true" || v == "yes" || v == "on";
+}
+
+static bool IsTimingEnabled() {
+    return IsDebugEnabled("DEBUG_DUNGEON_LOAD");
 }
 
 struct Mat4 {
@@ -1638,6 +1643,8 @@ static bool LoadDungeonFromPath(const std::string& path,
                                 std::vector<TileDef>* out_tiles,
                                 SpawnPoint* out_spawn,
                                 std::string* error_message) {
+    const bool timing = IsTimingEnabled();
+    auto start = std::chrono::steady_clock::now();
     std::string text;
     if (!LoadFileText(path.c_str(), &text)) {
         if (error_message)
@@ -1686,6 +1693,12 @@ static bool LoadDungeonFromPath(const std::string& path,
         *out_spawn = chunk_spawn;
     if (error_message)
         error_message->clear();
+    if (timing) {
+        auto end = std::chrono::steady_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::fprintf(stderr, "Dungeon load time: %lld ms (%zu blocks)\n",
+                     static_cast<long long>(ms), out_blocks ? out_blocks->size() : chunk_blocks.size());
+    }
     return true;
 }
 
@@ -2442,7 +2455,8 @@ int main(int, char**) {
     std::string catalog_error;
     TileCatalog catalog;
     const std::string repo_root = ResolveWorkspacePath(".");
-    const bool catalog_ok = LoadTileCatalog(repo_root, "RaidBuilder/tiles", default_texture_path, &catalog, &catalog_error);
+    std::vector<TileDef> base_tiles = LoadTileDefinitions(repo_root, "RaidBuilder/tiles", &catalog_error);
+    const bool catalog_ok = !base_tiles.empty();
     if (!catalog_error.empty())
         fprintf(stderr, "Tile catalog parse error: %s\n", catalog_error.c_str());
     std::string dungeon_error;
@@ -2457,8 +2471,8 @@ int main(int, char**) {
     } else if (!dungeon_spawn.valid) {
         fprintf(stderr, "%s\n", dungeon_error.c_str());
     }
-    if (catalog_ok && !catalog.tiles.empty()) {
-        tiles = catalog.tiles;
+    if (catalog_ok && !base_tiles.empty()) {
+        tiles = base_tiles;
         std::map<std::string, size_t> by_key;
         for (size_t i = 0; i < tiles.size(); ++i)
             by_key[tiles[i].key] = i;
@@ -2487,7 +2501,7 @@ int main(int, char**) {
         tiles.push_back(tile);
     }
 
-    TileCatalog merged_catalog = catalog;
+    TileCatalog merged_catalog;
     if (!tiles.empty()) {
         std::map<std::string, TileDef> overrides;
         for (size_t i = 0; i < dungeon_tiles.size(); ++i) {
