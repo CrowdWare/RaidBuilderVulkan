@@ -408,6 +408,39 @@ static bool SaveDungeonWithHistory(const std::string& path,
                                    float block_size,
                                    const std::vector<TileDef>& tiles);
 
+static TileDef MergeTileOverride(const TileDef& base, const TileDef& override_tile) {
+    TileDef merged = base;
+    const bool base_has_animation = !base.animation.empty();
+    const bool override_has_animation = !override_tile.animation.empty();
+    if (!override_tile.key.empty())
+        merged.key = override_tile.key;
+    if (!override_tile.name.empty())
+        merged.name = override_tile.name;
+    if (!override_tile.icon.empty())
+        merged.icon = override_tile.icon;
+    if (!override_tile.type.empty())
+        merged.type = override_tile.type;
+    if (!override_tile.material.empty())
+        merged.material = override_tile.material;
+    if (!override_tile.placement.empty())
+        merged.placement = override_tile.placement;
+    if (!override_tile.category.empty())
+        merged.category = override_tile.category;
+    if (!override_tile.animation.empty())
+        merged.animation = override_tile.animation;
+    if (!override_tile.model.empty() && (!base_has_animation || override_has_animation))
+        merged.model = override_tile.model;
+    if (!override_tile.texture.empty() && (!base_has_animation || override_has_animation))
+        merged.texture = override_tile.texture;
+    if (override_tile.height_cm != 60)
+        merged.height_cm = override_tile.height_cm;
+    if (override_tile.scale_percent != 100)
+        merged.scale_percent = override_tile.scale_percent;
+    if (override_tile.height_blocks != 1)
+        merged.height_blocks = override_tile.height_blocks;
+    return merged;
+}
+
 static const int kChunkSizeBlocks = 32;
 
 struct GridBlock {
@@ -564,9 +597,12 @@ static std::string BuildChunkedDungeonSml(const std::vector<TileDef>& tiles) {
         for (size_t i = 0; i < tiles.size(); ++i) {
             const std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
             out << "        Tile { key: \"" << tiles[i].key << "\"";
-            if (!tiles[i].texture.empty())
+            const bool has_animation = !tiles[i].animation.empty();
+            if (!tiles[i].texture.empty() && !has_animation)
                 out << " texture: \"" << tiles[i].texture << "\"";
             out << " model: \"" << model << "\"";
+            if (has_animation)
+                out << " animation: \"" << tiles[i].animation << "\"";
             if (tiles[i].type != "block")
                 out << " type: \"" << tiles[i].type << "\"";
             if (tiles[i].height_cm != 60)
@@ -1021,9 +1057,12 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
         for (size_t i = 0; i < tiles.size(); ++i) {
             const std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
             out << "        Tile { key: \"" << tiles[i].key << "\"";
-            if (!tiles[i].texture.empty())
+            const bool has_animation = !tiles[i].animation.empty();
+            if (!tiles[i].texture.empty() && !has_animation)
                 out << " texture: \"" << tiles[i].texture << "\"";
             out << " model: \"" << model << "\"";
+            if (has_animation)
+                out << " animation: \"" << tiles[i].animation << "\"";
             if (tiles[i].type != "block")
                 out << " type: \"" << tiles[i].type << "\"";
             if (tiles[i].height_cm != 60)
@@ -1168,6 +1207,9 @@ static bool EndsWith(const std::string& s, const std::string& suffix) {
 
 static bool IsSymmetricTileModel(const std::string& model_in) {
     std::string model = model_in;
+    size_t hash = model.find('#');
+    if (hash != std::string::npos)
+        model = model.substr(0, hash);
     if (model.empty())
         model = "block.glb";
     if (model.compare(0, 8, "texture:") == 0)
@@ -1301,6 +1343,8 @@ static bool ParseDungeon(const std::string& text,
                 tile.texture = value.string_value;
             if (stack.back() == "Tile" && name == "model" && value.type == sml::PropertyValue::String)
                 tile.model = value.string_value;
+            if (stack.back() == "Tile" && name == "animation" && value.type == sml::PropertyValue::String)
+                tile.animation = value.string_value;
             if (stack.back() == "Tile" && name == "type" && value.type == sml::PropertyValue::String)
                 tile.type = value.string_value;
             if (stack.back() == "Tile" && name == "material" && value.type == sml::PropertyValue::EnumType)
@@ -2422,9 +2466,7 @@ int main(int, char**) {
             const TileDef& src = dungeon_tiles[i];
             std::map<std::string, size_t>::iterator it = by_key.find(src.key);
             if (it != by_key.end()) {
-                TileDef merged = src;
-                if (merged.category.empty())
-                    merged.category = tiles[it->second].category;
+                TileDef merged = MergeTileOverride(tiles[it->second], src);
                 tiles[it->second] = merged;
             } else if (!src.key.empty()) {
                 tiles.push_back(src);
@@ -2455,9 +2497,7 @@ int main(int, char**) {
         for (size_t i = 0; i < tiles.size(); ++i) {
             std::map<std::string, TileDef>::const_iterator it = overrides.find(tiles[i].key);
             if (it != overrides.end()) {
-                TileDef merged = it->second;
-                if (merged.category.empty())
-                    merged.category = tiles[i].category;
+                TileDef merged = MergeTileOverride(tiles[i], it->second);
                 tiles[i] = merged;
             }
         }

@@ -56,7 +56,7 @@ Tile {
     key: "E"
     name: "Enemy"
     icon: "res://assets/textures/raid_enemy.png"
-    texture: "res://assets/textures/raid_enemy.png"
-    model: "../build/blocks_cache/block.glb"
+    model: "Assets/characters/Paladin.glb#Paladin_J_Nordstrom_Helmet"
+    animation: "Assets/animations/idle.glb"
     material: texture
 }
