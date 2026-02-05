@@ -27,7 +27,7 @@ cmake --build build
 
 ## Run
 ```sh
-./RaidBuilder
+./run_builder.sh
 ```
 
 ## Bedienung (Input)
