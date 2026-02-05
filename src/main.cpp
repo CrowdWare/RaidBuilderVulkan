@@ -34,6 +34,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cctype>
 #include <map>
 #include <algorithm>
 #include <unordered_set>
@@ -62,6 +63,15 @@ static long long BlockKey(int x, int y, int z) {
     long long yy = static_cast<long long>(y + kOffset) & kMask;
     long long zz = static_cast<long long>(z + kOffset) & kMask;
     return (xx << 42) | (yy << 21) | zz;
+}
+
+static bool IsDebugEnabled(const char* env_name) {
+    const char* value = std::getenv(env_name);
+    if (!value)
+        return false;
+    std::string v(value);
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return v == "1" || v == "true" || v == "yes" || v == "on";
 }
 
 struct Mat4 {
@@ -1502,6 +1512,11 @@ static std::vector<ChunkFileInfo> CollectChunkFiles(const std::string& folder) {
     }
     closedir(dir);
 #endif
+    std::sort(files.begin(), files.end(), [](const ChunkFileInfo& a, const ChunkFileInfo& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
     return files;
 }
 
@@ -1522,6 +1537,15 @@ static bool LoadChunkedDungeon(const std::string& folder,
         if (error_message)
             *error_message = "No chunk files (dungeon_*.sml) found in " + folder;
         return false;
+    }
+
+    const bool debug_chunks = IsDebugEnabled("CHUNK_DEBUG");
+    if (debug_chunks) {
+        fprintf(stdout, "Chunk load order (%zu total):\n", files.size());
+        for (size_t i = 0; i < files.size(); ++i) {
+            fprintf(stdout, "chunk[%zu] = (%d,%d,%d) %s\n",
+                    i, files[i].x, files[i].y, files[i].z, files[i].path.c_str());
+        }
     }
 
     bool spawn_found = false;
