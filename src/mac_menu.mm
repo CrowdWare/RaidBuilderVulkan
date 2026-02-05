@@ -122,6 +122,35 @@ static void ClearMenuEntries(NSMenu* main_menu, NSInteger start_index, NSInteger
     }
 }
 
+std::string MacSelectFolder(const char* title, const char* default_path) {
+    @autoreleasepool {
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        [panel setCanChooseFiles:NO];
+        [panel setCanChooseDirectories:YES];
+        [panel setAllowsMultipleSelection:NO];
+        [panel setCanCreateDirectories:YES];
+        if (title) {
+            [panel setTitle:[NSString stringWithUTF8String:title]];
+        }
+        if (default_path && default_path[0] != '\0') {
+            NSString* path = [NSString stringWithUTF8String:default_path];
+            NSURL* url = [NSURL fileURLWithPath:path];
+            [panel setDirectoryURL:url];
+        }
+        NSInteger result = [panel runModal];
+        if (result == NSModalResponseOK) {
+            NSURL* url = [[panel URLs] firstObject];
+            if (url) {
+                NSString* selected = [url path];
+                if (selected) {
+                    return std::string([selected UTF8String]);
+                }
+            }
+        }
+    }
+    return std::string();
+}
+
 void BuildMacMainMenu(GLFWwindow* window, const smlui::UiWindow& ui_window,
                       MenuActionCallback callback, void* user_data) {
     (void)window;
@@ -184,4 +213,5 @@ void BuildMacMainMenu(GLFWwindow* window, const smlui::UiWindow& ui_window,
 
 #else
 void BuildMacMainMenu(GLFWwindow*, const smlui::UiWindow&, MenuActionCallback, void*) {}
+std::string MacSelectFolder(const char*, const char*) { return std::string(); }
 #endif

@@ -1,14 +1,14 @@
 CXX ?= c++
 
 EXE = RaidBuilder
-SRCS = src/main.cpp src/block_sml.cpp src/gltf_loader.cpp
+SRCS = src/main.cpp src/block_sml.cpp src/gltf_loader.cpp third_party/tinyfiledialogs/tinyfiledialogs.c
 ifeq ($(shell uname),Darwin)
 SRCS += src/mac_menu.mm
 endif
 OBJS = $(patsubst %.cpp,%.o,$(SRCS))
 OBJS := $(patsubst %.mm,%.o,$(OBJS))
 
-CXXFLAGS = -std=c++11 -Iinclude -I../VoxelEngine/include -I../SMLParser/include -I../SMLUI/include -I../SMLUI/imgui -I../SMLUI/imgui/backends -Ithird_party/tinygltf/tinygltf-2.9.7 -O2 -Wall -MMD -MP
+CXXFLAGS = -std=c++11 -Iinclude -I../VoxelEngine/include -I../SMLParser/include -I../SMLUI/include -I../SMLUI/imgui -I../SMLUI/imgui/backends -Ithird_party/tinyfiledialogs -Ithird_party/tinygltf/tinygltf-2.9.7 -O2 -Wall -MMD -MP
 CXXFLAGS += $(shell pkg-config --cflags glfw3 vulkan)
 DEPS = $(OBJS:.o=.d)
 

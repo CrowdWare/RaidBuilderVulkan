@@ -42,6 +42,7 @@
 #include <cerrno>
 #if defined(_WIN32)
 #include <direct.h>
+#include <io.h>
 #else
 #include <dirent.h>
 #endif
@@ -243,6 +244,8 @@ static bool FindNextFreePlacement(const std::vector<voxel::VoxelRenderer::Block>
 
 #if defined(__APPLE__)
 #include "mac_menu.h"
+#else
+#include "tinyfiledialogs.h"
 #endif
 
 static VkAllocationCallbacks* g_Allocator = nullptr;
@@ -377,6 +380,308 @@ static bool CopyFile(const std::string& src, const std::string& dst) {
         return false;
     out << in.rdbuf();
     return true;
+}
+
+static bool WriteTextFile(const std::string& path, const std::string& contents) {
+    EnsureDir(GetParentDir(path));
+    std::ofstream out(path.c_str(), std::ios::trunc);
+    if (!out.is_open())
+        return false;
+    out << contents;
+    return true;
+}
+
+// Forward declarations for helpers used before their definitions.
+static bool IsSymmetricTileModel(const std::string& model_in);
+static bool SaveDungeonWithHistory(const std::string& path,
+                                   const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                                   float block_size,
+                                   const std::vector<TileDef>& tiles);
+
+static const int kChunkSizeBlocks = 32;
+
+struct GridBlock {
+    int gx = 0;
+    int gy = 0;
+    int gz = 0;
+    std::string key;
+};
+
+static std::string BuildBlockKeyForSave(const voxel::VoxelRenderer::Block& block,
+                                        const std::map<std::string, bool>& symmetric_by_key) {
+    std::string key = block.key.empty() ? "s" : block.key;
+    int rot_x = (int)std::round(block.rot_x_deg / 90.0f);
+    int rot_y = (int)std::round(block.rot_y_deg / 90.0f);
+    int rot_z = (int)std::round(block.rot_z_deg / 90.0f);
+    rot_x = ((rot_x % 4) + 4) % 4;
+    rot_y = ((rot_y % 4) + 4) % 4;
+    rot_z = ((rot_z % 4) + 4) % 4;
+    std::map<std::string, bool>::const_iterator sym_it = symmetric_by_key.find(key);
+    if (sym_it != symmetric_by_key.end() && sym_it->second) {
+        rot_x = 0;
+        rot_y = 0;
+        rot_z = 0;
+    }
+    std::vector<std::string> rot_parts;
+    if (rot_x != 0)
+        rot_parts.push_back("x" + std::to_string(rot_x));
+    if (rot_y != 0)
+        rot_parts.push_back("y" + std::to_string(rot_y));
+    if (rot_z != 0)
+        rot_parts.push_back("z" + std::to_string(rot_z));
+    if (!rot_parts.empty()) {
+        key += ":";
+        for (size_t ri = 0; ri < rot_parts.size(); ++ri) {
+            key += rot_parts[ri];
+            if (ri + 1 < rot_parts.size())
+                key += ",";
+        }
+    }
+    return key;
+}
+
+static std::vector<GridBlock> CollectGridBlocks(const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                                                float block_size,
+                                                const std::vector<TileDef>& tiles) {
+    std::map<std::string, bool> symmetric_by_key;
+    for (size_t i = 0; i < tiles.size(); ++i)
+        symmetric_by_key[tiles[i].key] = IsSymmetricTileModel(tiles[i].model);
+    std::vector<GridBlock> out;
+    out.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        GridBlock gb;
+        gb.gx = (int)std::round(blocks[i].x / block_size - 0.5f);
+        gb.gz = (int)std::round(blocks[i].z / block_size - 0.5f);
+        gb.gy = (int)std::round(blocks[i].y / block_size - 0.5f);
+        gb.key = BuildBlockKeyForSave(blocks[i], symmetric_by_key);
+        out.push_back(gb);
+    }
+    return out;
+}
+
+struct DungeonBounds {
+    bool has = false;
+    int min_x = 0;
+    int max_x = 0;
+    int min_y = 0;
+    int max_y = 0;
+    int min_z = 0;
+    int max_z = 0;
+};
+
+static DungeonBounds ComputeBounds(const std::vector<GridBlock>& blocks) {
+    DungeonBounds b;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (!b.has) {
+            b.has = true;
+            b.min_x = b.max_x = blocks[i].gx;
+            b.min_y = b.max_y = blocks[i].gy;
+            b.min_z = b.max_z = blocks[i].gz;
+        } else {
+            b.min_x = std::min(b.min_x, blocks[i].gx);
+            b.max_x = std::max(b.max_x, blocks[i].gx);
+            b.min_y = std::min(b.min_y, blocks[i].gy);
+            b.max_y = std::max(b.max_y, blocks[i].gy);
+            b.min_z = std::min(b.min_z, blocks[i].gz);
+            b.max_z = std::max(b.max_z, blocks[i].gz);
+        }
+    }
+    return b;
+}
+
+static bool NeedsChunking(const DungeonBounds& bounds) {
+    if (!bounds.has)
+        return false;
+    int width = bounds.max_x - bounds.min_x + 1;
+    int depth = bounds.max_z - bounds.min_z + 1;
+    return width > kChunkSizeBlocks || depth > kChunkSizeBlocks;
+}
+
+static int FloorDiv(int value, int divisor) {
+    int q = value / divisor;
+    int r = value % divisor;
+    if (r != 0 && ((r > 0) != (divisor > 0)))
+        --q;
+    return q;
+}
+
+struct ChunkCoord {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    bool operator<(const ChunkCoord& other) const {
+        if (x != other.x) return x < other.x;
+        if (y != other.y) return y < other.y;
+        return z < other.z;
+    }
+};
+
+static std::string BuildChunkSml(const std::vector<GridBlock>& blocks) {
+    std::map<int, std::map<std::pair<int, int>, std::string> > layers;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        layers[blocks[i].gy][std::make_pair(blocks[i].gx, blocks[i].gz)] = blocks[i].key;
+    }
+
+    std::ostringstream out;
+    out << "Dungeon {\n";
+    out << "    TileMap {\n";
+    out << "        lines: \"\n";
+    for (std::map<int, std::map<std::pair<int, int>, std::string> >::const_iterator it = layers.begin(); it != layers.end(); ++it) {
+        out << "#" << it->first << "\n";
+        for (int z = 0; z < kChunkSizeBlocks; ++z) {
+            for (int x = 0; x < kChunkSizeBlocks; ++x) {
+                std::map<std::pair<int, int>, std::string>::const_iterator cell = it->second.find(std::make_pair(x, z));
+                const std::string value = (cell != it->second.end()) ? cell->second : ".";
+                out << value;
+                if (x < kChunkSizeBlocks - 1)
+                    out << " ";
+            }
+            out << "\n";
+        }
+    }
+    out << "        \"\n";
+    out << "    }\n";
+    out << "}\n";
+    return out.str();
+}
+
+static std::string BuildChunkedDungeonSml(const std::vector<TileDef>& tiles) {
+    std::ostringstream out;
+    out << "Dungeon {\n";
+    out << "    ChunkSize: " << kChunkSizeBlocks << "\n\n";
+    if (!tiles.empty()) {
+        out << "    Tiles {\n";
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            const std::string model = tiles[i].model.empty() ? "block.glb" : tiles[i].model;
+            out << "        Tile { key: \"" << tiles[i].key << "\"";
+            if (!tiles[i].texture.empty())
+                out << " texture: \"" << tiles[i].texture << "\"";
+            out << " model: \"" << model << "\"";
+            if (tiles[i].type != "block")
+                out << " type: \"" << tiles[i].type << "\"";
+            if (tiles[i].height_cm != 60)
+                out << " height_cm: " << tiles[i].height_cm;
+            if (tiles[i].scale_percent != 100)
+                out << " scale_percent: " << tiles[i].scale_percent;
+            out << " }\n";
+        }
+        out << "    }\n";
+    }
+    out << "}\n";
+    return out.str();
+}
+
+static std::string JoinPath(const std::string& a, const std::string& b) {
+    if (a.empty())
+        return b;
+    char last = a[a.size() - 1];
+    if (last == '/' || last == '\\')
+        return a + b;
+    return a + "/" + b;
+}
+
+static std::string SelectFolderDialog(const char* title, const std::string& default_path) {
+#if defined(__APPLE__)
+    return MacSelectFolder(title, default_path.empty() ? nullptr : default_path.c_str());
+#else
+    const char* selected = tinyfd_selectFolderDialog(title, default_path.empty() ? nullptr : default_path.c_str());
+    if (!selected)
+        return std::string();
+    return std::string(selected);
+#endif
+}
+
+static bool ParseChunkSize(const std::string& text, int* out_size) {
+    if (!out_size)
+        return false;
+    class ChunkHandler : public sml::SmlHandler {
+    public:
+        int value = 0;
+        bool found = false;
+        void startElement(const std::string& name) override { (void)name; }
+        void onProperty(const std::string& name, const sml::PropertyValue& value) override {
+            if (name == "ChunkSize" && value.type == sml::PropertyValue::Int) {
+                this->value = value.int_value;
+                this->found = true;
+            }
+        }
+        void endElement(const std::string& name) override { (void)name; }
+    };
+
+    ChunkHandler handler;
+    try {
+        sml::SmlSaxParser parser(text);
+        parser.parse(handler);
+    } catch (...) {
+        return false;
+    }
+    if (handler.found)
+        *out_size = handler.value;
+    return handler.found;
+}
+
+static bool ParseChunkFilename(const std::string& name, int* out_x, int* out_y, int* out_z) {
+    int x = 0, y = 0, z = 0;
+    if (std::sscanf(name.c_str(), "dungeon_%d_%d_%d.sml", &x, &y, &z) == 3) {
+        if (out_x) *out_x = x;
+        if (out_y) *out_y = y;
+        if (out_z) *out_z = z;
+        return true;
+    }
+    return false;
+}
+
+static bool SaveDungeonChunked(const std::string& folder,
+                               const std::vector<GridBlock>& grid_blocks,
+                               const std::vector<TileDef>& tiles) {
+    if (folder.empty())
+        return false;
+    if (!EnsureDir(folder))
+        return false;
+
+    const std::string dungeon_path = JoinPath(folder, "dungeon.sml");
+    if (!WriteTextFile(dungeon_path, BuildChunkedDungeonSml(tiles)))
+        return false;
+
+    std::map<ChunkCoord, std::vector<GridBlock> > chunks;
+    for (size_t i = 0; i < grid_blocks.size(); ++i) {
+        ChunkCoord coord;
+        coord.x = FloorDiv(grid_blocks[i].gx, kChunkSizeBlocks);
+        coord.y = FloorDiv(grid_blocks[i].gy, kChunkSizeBlocks);
+        coord.z = FloorDiv(grid_blocks[i].gz, kChunkSizeBlocks);
+
+        GridBlock local = grid_blocks[i];
+        local.gx = grid_blocks[i].gx - coord.x * kChunkSizeBlocks;
+        local.gy = grid_blocks[i].gy - coord.y * kChunkSizeBlocks;
+        local.gz = grid_blocks[i].gz - coord.z * kChunkSizeBlocks;
+        chunks[coord].push_back(local);
+    }
+
+    for (std::map<ChunkCoord, std::vector<GridBlock> >::const_iterator it = chunks.begin(); it != chunks.end(); ++it) {
+        const ChunkCoord& coord = it->first;
+        std::ostringstream name;
+        name << "dungeon_" << coord.x << "_" << coord.y << "_" << coord.z << ".sml";
+        const std::string chunk_path = JoinPath(folder, name.str());
+        if (!WriteTextFile(chunk_path, BuildChunkSml(it->second)))
+            return false;
+    }
+
+    return true;
+}
+
+static bool SaveDungeonAuto(const std::string& path,
+                            const std::vector<voxel::VoxelRenderer::Block>& blocks,
+                            float block_size,
+                            const std::vector<TileDef>& tiles) {
+    if (path.empty())
+        return false;
+    std::vector<GridBlock> grid_blocks = CollectGridBlocks(blocks, block_size, tiles);
+    DungeonBounds bounds = ComputeBounds(grid_blocks);
+    if (!NeedsChunking(bounds)) {
+        return SaveDungeonWithHistory(path, blocks, block_size, tiles);
+    }
+    const std::string folder = GetParentDir(path);
+    return SaveDungeonChunked(folder, grid_blocks, tiles);
 }
 
 static void UpdateWindowTitle(GLFWwindow* window,
@@ -534,10 +839,9 @@ static void SaveAppState(const std::string& path, const AppState& state) {
 
 using ::TileDef;
 
-// Forward declarations for path resolution helpers used by the tile catalog loader.
+// Forward declarations for helpers used ahead of their definitions.
 static std::string ResolveRepoDir(const std::string& rel);
 static std::string ResolveWorkspacePath(const std::string& rel);
-static bool IsSymmetricTileModel(const std::string& model_in);
 
 static std::string GetActionBarPath() {
     return GetStateDir() + "/actionbar.cfg";
@@ -1146,6 +1450,175 @@ static bool ParseDungeon(const std::string& text,
     }
 
     *out_blocks = blocks;
+    return true;
+}
+
+struct ChunkFileInfo {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    std::string path;
+};
+
+static std::vector<ChunkFileInfo> CollectChunkFiles(const std::string& folder) {
+    std::vector<ChunkFileInfo> files;
+#if defined(_WIN32)
+    std::string pattern = JoinPath(folder, "dungeon_*.sml");
+    _finddata_t data;
+    intptr_t handle = _findfirst(pattern.c_str(), &data);
+    if (handle == -1)
+        return files;
+    do {
+        if (data.name[0] == '.')
+            continue;
+        int cx = 0, cy = 0, cz = 0;
+        if (ParseChunkFilename(data.name, &cx, &cy, &cz)) {
+            ChunkFileInfo info;
+            info.x = cx;
+            info.y = cy;
+            info.z = cz;
+            info.path = JoinPath(folder, data.name);
+            files.push_back(info);
+        }
+    } while (_findnext(handle, &data) == 0);
+    _findclose(handle);
+#else
+    DIR* dir = opendir(folder.c_str());
+    if (!dir)
+        return files;
+    dirent* entry = nullptr;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (!entry->d_name || entry->d_name[0] == '.')
+            continue;
+        std::string name(entry->d_name);
+        int cx = 0, cy = 0, cz = 0;
+        if (ParseChunkFilename(name, &cx, &cy, &cz)) {
+            ChunkFileInfo info;
+            info.x = cx;
+            info.y = cy;
+            info.z = cz;
+            info.path = JoinPath(folder, name);
+            files.push_back(info);
+        }
+    }
+    closedir(dir);
+#endif
+    return files;
+}
+
+static bool LoadChunkedDungeon(const std::string& folder,
+                               int chunk_size_blocks,
+                               float block_size,
+                               std::vector<voxel::VoxelRenderer::Block>* out_blocks,
+                               SpawnPoint* out_spawn,
+                               std::string* error_message) {
+    if (!out_blocks)
+        return false;
+    out_blocks->clear();
+    if (out_spawn)
+        *out_spawn = SpawnPoint();
+
+    std::vector<ChunkFileInfo> files = CollectChunkFiles(folder);
+    if (files.empty()) {
+        if (error_message)
+            *error_message = "No chunk files (dungeon_*.sml) found in " + folder;
+        return false;
+    }
+
+    bool spawn_found = false;
+    for (size_t i = 0; i < files.size(); ++i) {
+        std::string chunk_text;
+        if (!LoadFileText(files[i].path.c_str(), &chunk_text)) {
+            if (error_message)
+                *error_message = "Dungeon load error: could not read " + files[i].path;
+            return false;
+        }
+        std::vector<voxel::VoxelRenderer::Block> chunk_blocks;
+        std::vector<TileDef> chunk_tiles;
+        SpawnPoint chunk_spawn;
+        std::string chunk_error;
+        if (!ParseDungeon(chunk_text, block_size, &chunk_blocks, &chunk_tiles, &chunk_spawn, &chunk_error)) {
+            if (error_message)
+                *error_message = chunk_error.empty() ? "Chunk parse error" : chunk_error;
+            return false;
+        }
+        const float offset_x = (float)(files[i].x * chunk_size_blocks) * block_size;
+        const float offset_y = (float)(files[i].y * chunk_size_blocks) * block_size;
+        const float offset_z = (float)(files[i].z * chunk_size_blocks) * block_size;
+        for (size_t bi = 0; bi < chunk_blocks.size(); ++bi) {
+            chunk_blocks[bi].x += offset_x;
+            chunk_blocks[bi].y += offset_y;
+            chunk_blocks[bi].z += offset_z;
+            out_blocks->push_back(chunk_blocks[bi]);
+        }
+        if (out_spawn && chunk_spawn.valid && !spawn_found) {
+            chunk_spawn.x += offset_x;
+            chunk_spawn.y += offset_y;
+            chunk_spawn.z += offset_z;
+            *out_spawn = chunk_spawn;
+            spawn_found = true;
+        }
+    }
+
+    if (out_spawn && !spawn_found)
+        out_spawn->valid = false;
+    return true;
+}
+
+static bool LoadDungeonFromPath(const std::string& path,
+                                float block_size,
+                                std::vector<voxel::VoxelRenderer::Block>* out_blocks,
+                                std::vector<TileDef>* out_tiles,
+                                SpawnPoint* out_spawn,
+                                std::string* error_message) {
+    std::string text;
+    if (!LoadFileText(path.c_str(), &text)) {
+        if (error_message)
+            *error_message = std::string("Dungeon load error: could not read ") + path;
+        return false;
+    }
+
+    int chunk_size = 0;
+    const bool has_chunk = ParseChunkSize(text, &chunk_size);
+    std::vector<voxel::VoxelRenderer::Block> base_blocks;
+    std::vector<TileDef> base_tiles;
+    SpawnPoint base_spawn;
+    std::string parse_error;
+    if (!ParseDungeon(text, block_size, &base_blocks, &base_tiles, &base_spawn, &parse_error)) {
+        if (error_message)
+            *error_message = parse_error;
+        return false;
+    }
+
+    if (out_tiles)
+        *out_tiles = base_tiles;
+
+    if (!has_chunk) {
+        if (out_blocks)
+            *out_blocks = base_blocks;
+        if (out_spawn)
+            *out_spawn = base_spawn;
+        if (error_message)
+            *error_message = parse_error;
+        return true;
+    }
+
+    const int effective_chunk = (chunk_size > 0) ? chunk_size : kChunkSizeBlocks;
+    std::vector<voxel::VoxelRenderer::Block> chunk_blocks;
+    SpawnPoint chunk_spawn;
+    std::string chunk_error;
+    if (!LoadChunkedDungeon(GetParentDir(path), effective_chunk, block_size, &chunk_blocks, &chunk_spawn, &chunk_error)) {
+        if (error_message)
+            *error_message = chunk_error;
+        return false;
+    }
+
+    if (out_blocks)
+        *out_blocks = chunk_blocks;
+    if (out_spawn)
+        *out_spawn = chunk_spawn;
+    if (error_message)
+        error_message->clear();
     return true;
 }
 
@@ -1905,13 +2378,15 @@ int main(int, char**) {
     const bool catalog_ok = LoadTileCatalog(repo_root, "RaidBuilder/tiles", default_texture_path, &catalog, &catalog_error);
     if (!catalog_error.empty())
         fprintf(stderr, "Tile catalog parse error: %s\n", catalog_error.c_str());
-    std::string dungeon_text;
     std::string dungeon_error;
     SpawnPoint dungeon_spawn;
-    if (!LoadFileText(current_dungeon_path.c_str(), &dungeon_text)) {
-        fprintf(stderr, "Dungeon load error: could not read %s\n", current_dungeon_path.c_str());
-    } else if (!ParseDungeon(dungeon_text, block_size, &dungeon_blocks, &dungeon_tiles, &dungeon_spawn, &dungeon_error)) {
-        fprintf(stderr, "Dungeon parse error: %s\n", dungeon_error.c_str());
+    if (!LoadDungeonFromPath(current_dungeon_path,
+                             block_size,
+                             &dungeon_blocks,
+                             &dungeon_tiles,
+                             &dungeon_spawn,
+                             &dungeon_error)) {
+        fprintf(stderr, "%s\n", dungeon_error.c_str());
     } else if (!dungeon_spawn.valid) {
         fprintf(stderr, "%s\n", dungeon_error.c_str());
     }
@@ -2385,19 +2860,24 @@ int main(int, char**) {
             int action_id = pending_menu_action;
             pending_menu_action = 0;
             if (action_id == MENU_ACTION_SAVE) {
-                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
+                if (SaveDungeonAuto(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                     saved_state.last_file_path = current_dungeon_path;
                     SaveAppState(state_path, saved_state);
                     dirty = false;
                     UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
                 }
             } else if (action_id == MENU_ACTION_SAVE_AS) {
-                // TODO: Replace with native file dialog when available.
-                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
-                    saved_state.last_file_path = current_dungeon_path;
-                    SaveAppState(state_path, saved_state);
-                    dirty = false;
-                    UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+                std::string default_dir = GetParentDir(current_dungeon_path);
+                std::string selected = SelectFolderDialog("Save Dungeon As", default_dir);
+                if (!selected.empty()) {
+                    std::string target_path = JoinPath(selected, "dungeon.sml");
+                    if (SaveDungeonAuto(target_path, dungeon_blocks, block_size, tiles)) {
+                        current_dungeon_path = target_path;
+                        saved_state.last_file_path = current_dungeon_path;
+                        SaveAppState(state_path, saved_state);
+                        dirty = false;
+                        UpdateWindowTitle(window, base_window_title, current_dungeon_path, dirty);
+                    }
                 }
             } else if (action_id == MENU_ACTION_OPEN) {
                 // TODO: Replace with native file dialog when available.
@@ -2433,7 +2913,7 @@ int main(int, char**) {
                          (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
         bool save_combo = save_key_down && (cmd_down || ctrl_down);
         if (save_combo && !save_was_down) {
-            if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
+            if (SaveDungeonAuto(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                 saved_state.last_file_path = current_dungeon_path;
                 SaveAppState(state_path, saved_state);
                 dirty = false;
@@ -2960,7 +3440,7 @@ int main(int, char**) {
             ImGui::TextUnformatted("You have unsaved changes.");
             ImGui::Separator();
             if (ImGui::Button("Save")) {
-                if (SaveDungeonWithHistory(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
+                if (SaveDungeonAuto(current_dungeon_path, dungeon_blocks, block_size, tiles)) {
                     saved_state.last_file_path = current_dungeon_path;
                     SaveAppState(state_path, saved_state);
                     dirty = false;
