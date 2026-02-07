@@ -433,7 +433,9 @@ static TileDef MergeTileOverride(const TileDef& base, const TileDef& override_ti
         merged.category = override_tile.category;
     if (!override_tile.animation.empty())
         merged.animation = override_tile.animation;
-    if (!override_tile.model.empty() && (!base_has_animation || override_has_animation))
+    // For animated catalog tiles, keep the model from tiles.sml as source of truth.
+    // This avoids persisting stale dungeon overrides (e.g. old .glb) over newer catalog .gltf entries.
+    if (!override_tile.model.empty() && !base_has_animation)
         merged.model = override_tile.model;
     if (!override_tile.texture.empty() && (!base_has_animation || override_has_animation))
         merged.texture = override_tile.texture;

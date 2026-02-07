@@ -57,7 +57,7 @@ Tile {
     key: "E"
     name: "Enemy"
     icon: "res://assets/textures/raid_enemy.png"
-    model: "Assets/characters/Paladin.gltf#Paladin_J_Nordstrom_Helmet#Paladin_J_Nordstrom"
+    model: "Assets/characters/Paladin.glb#Paladin_J_Nordstrom_Helmet#Paladin_J_Nordstrom"
     animation: "Assets/animations/idle.glb"
     material: skinned
     collision: false
