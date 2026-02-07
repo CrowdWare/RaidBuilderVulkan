@@ -614,6 +614,8 @@ static std::string BuildChunkedDungeonSml(const std::vector<TileDef>& tiles) {
                 out << " height_cm: " << tiles[i].height_cm;
             if (tiles[i].scale_percent != 100)
                 out << " scale_percent: " << tiles[i].scale_percent;
+            if (!tiles[i].collision)
+                out << " collision: false";
             out << " }\n";
         }
         out << "    }\n";
@@ -1074,6 +1076,8 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
                 out << " height_cm: " << tiles[i].height_cm;
             if (tiles[i].scale_percent != 100)
                 out << " scale_percent: " << tiles[i].scale_percent;
+            if (!tiles[i].collision)
+                out << " collision: false";
             out << " }\n";
         }
         out << "    }\n\n";
@@ -1360,6 +1364,10 @@ static bool ParseDungeon(const std::string& text,
                 tile.height_cm = value.int_value;
             if (stack.back() == "Tile" && name == "scale_percent" && value.type == sml::PropertyValue::Int)
                 tile.scale_percent = value.int_value;
+            if (stack.back() == "Tile" && name == "collision" && value.type == sml::PropertyValue::Boolean) {
+                tile.collision = value.bool_value;
+                tile.has_collision = true;
+            }
         }
         void endElement(const std::string& name) override {
             if (name == "Tile") {
@@ -2761,8 +2769,17 @@ int main(int, char**) {
     voxel::CharacterController character(character_config);
     std::unordered_set<long long> solid_blocks;
     solid_blocks.reserve(dungeon_blocks.size());
+    auto tile_has_collision = [&](const std::string& key) -> bool {
+        std::map<std::string, int>::const_iterator it = tile_index_by_key.find(key);
+        if (it == tile_index_by_key.end())
+            return true;
+        int idx = it->second;
+        if (idx < 0 || idx >= (int)tiles.size())
+            return true;
+        return tiles[(size_t)idx].collision;
+    };
     for (size_t i = 0; i < dungeon_blocks.size(); ++i) {
-        if (dungeon_blocks[i].key == "S")
+        if (!tile_has_collision(dungeon_blocks[i].key))
             continue;
         int wx = (int)std::round(dungeon_blocks[i].x / block_size - 0.5f);
         int wy = (int)std::round(dungeon_blocks[i].y / block_size - 0.5f);
@@ -2770,7 +2787,7 @@ int main(int, char**) {
         solid_blocks.insert(BlockKey(wx, wy, wz));
     }
     auto add_solid_block = [&](const voxel::VoxelRenderer::Block& block) {
-        if (block.key == "S")
+        if (!tile_has_collision(block.key))
             return;
         int wx = (int)std::round(block.x / block_size - 0.5f);
         int wy = (int)std::round(block.y / block_size - 0.5f);
