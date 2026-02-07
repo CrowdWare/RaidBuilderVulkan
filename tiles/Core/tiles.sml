@@ -70,6 +70,7 @@ Tile {
     icon: "res://assets/textures/raid_enemy.png"
     model: "Assets/characters/granny.gltf"
     animation: "Assets/animations/idle.glb"
+    scalePercent: 170
     material: skinned
     collision: false
 }

@@ -441,7 +441,9 @@ static TileDef MergeTileOverride(const TileDef& base, const TileDef& override_ti
         merged.texture = override_tile.texture;
     if (override_tile.height_cm != 60)
         merged.height_cm = override_tile.height_cm;
-    if (override_tile.scale_percent != 100)
+    // Catalog values should win over stale dungeon overrides.
+    // Only take dungeon scale if catalog kept the default (100).
+    if (base.scale_percent == 100 && override_tile.scale_percent != 100)
         merged.scale_percent = override_tile.scale_percent;
     if (override_tile.height_blocks != 1)
         merged.height_blocks = override_tile.height_blocks;
@@ -610,12 +612,14 @@ static std::string BuildChunkedDungeonSml(const std::vector<TileDef>& tiles) {
             out << " model: \"" << model << "\"";
             if (has_animation)
                 out << " animation: \"" << tiles[i].animation << "\"";
+            if (!tiles[i].material.empty())
+                out << " material: \"" << tiles[i].material << "\"";
             if (tiles[i].type != "block")
                 out << " type: \"" << tiles[i].type << "\"";
             if (tiles[i].height_cm != 60)
                 out << " height_cm: " << tiles[i].height_cm;
             if (tiles[i].scale_percent != 100)
-                out << " scale_percent: " << tiles[i].scale_percent;
+                out << " scalePercent: " << tiles[i].scale_percent;
             if (!tiles[i].collision)
                 out << " collision: false";
             out << " }\n";
@@ -1072,12 +1076,14 @@ static std::string BuildDungeonSml(const std::vector<voxel::VoxelRenderer::Block
             out << " model: \"" << model << "\"";
             if (has_animation)
                 out << " animation: \"" << tiles[i].animation << "\"";
+            if (!tiles[i].material.empty())
+                out << " material: \"" << tiles[i].material << "\"";
             if (tiles[i].type != "block")
                 out << " type: \"" << tiles[i].type << "\"";
             if (tiles[i].height_cm != 60)
                 out << " height_cm: " << tiles[i].height_cm;
             if (tiles[i].scale_percent != 100)
-                out << " scale_percent: " << tiles[i].scale_percent;
+                out << " scalePercent: " << tiles[i].scale_percent;
             if (!tiles[i].collision)
                 out << " collision: false";
             out << " }\n";
@@ -1358,13 +1364,14 @@ static bool ParseDungeon(const std::string& text,
                 tile.animation = value.string_value;
             if (stack.back() == "Tile" && name == "type" && value.type == sml::PropertyValue::String)
                 tile.type = value.string_value;
-            if (stack.back() == "Tile" && name == "material" && value.type == sml::PropertyValue::EnumType)
+            if (stack.back() == "Tile" && name == "material" &&
+                (value.type == sml::PropertyValue::EnumType || value.type == sml::PropertyValue::String))
                 tile.material = value.string_value;
             if (stack.back() == "Tile" && name == "placement" && value.type == sml::PropertyValue::EnumType)
                 tile.placement = value.string_value;
             if (stack.back() == "Tile" && name == "height_cm" && value.type == sml::PropertyValue::Int)
                 tile.height_cm = value.int_value;
-            if (stack.back() == "Tile" && name == "scale_percent" && value.type == sml::PropertyValue::Int)
+            if (stack.back() == "Tile" && (name == "scale_percent" || name == "scalePercent") && value.type == sml::PropertyValue::Int)
                 tile.scale_percent = value.int_value;
             if (stack.back() == "Tile" && name == "collision" && value.type == sml::PropertyValue::Boolean) {
                 tile.collision = value.bool_value;
@@ -2010,6 +2017,8 @@ struct InspectorContext {
     bool* edit_mode = nullptr;
     bool* hover_has_block = nullptr;
     int* hover_block_index = nullptr;
+    std::vector<TileDef>* tiles = nullptr;
+    std::map<std::string, int>* tile_index_by_key = nullptr;
     float* main_scale = nullptr;
     AppState* saved_state = nullptr;
 };
@@ -2039,6 +2048,44 @@ static void RenderInspectorPanel(const ImVec2& panel_pos, const ImVec2& panel_si
         voxel::VoxelRenderer::Block& blk = (*ctx->blocks)[inspector_block_index];
         ImGui::Text("Block #%d  key=%s", inspector_block_index, blk.key.c_str());
         ImGui::Text("Rotation: X=%.0f  Y=%.0f  Z=%.0f", blk.rot_x_deg, blk.rot_y_deg, blk.rot_z_deg);
+
+        int tile_idx = -1;
+        if (ctx->tile_index_by_key) {
+            std::map<std::string, int>::const_iterator it = ctx->tile_index_by_key->find(blk.key);
+            if (it != ctx->tile_index_by_key->end())
+                tile_idx = it->second;
+        }
+        if (ctx->tiles && tile_idx >= 0 && tile_idx < (int)ctx->tiles->size()) {
+            TileDef& tile = (*ctx->tiles)[tile_idx];
+            int scale_percent = (tile.scale_percent > 0) ? tile.scale_percent : 100;
+            if (ImGui::SliderInt("Scale %", &scale_percent, 1, 300)) {
+                tile.scale_percent = scale_percent;
+                for (size_t bi = 0; bi < ctx->blocks->size(); ++bi) {
+                    if ((*ctx->blocks)[bi].key == tile.key)
+                        (*ctx->blocks)[bi].scale_percent = scale_percent;
+                }
+                g_VoxelRenderer.setBlocks(*ctx->blocks, ctx->block_size);
+                if (ctx->dirty)
+                    *ctx->dirty = true;
+                if (ctx->window && ctx->base_window_title && ctx->current_dungeon_path && ctx->dirty)
+                    UpdateWindowTitle(ctx->window, *ctx->base_window_title, *ctx->current_dungeon_path, *ctx->dirty);
+            }
+
+            const char* materials[] = {"texture", "vertex", "skinned"};
+            int material_idx = 0;
+            if (tile.material == "vertex")
+                material_idx = 1;
+            else if (tile.material == "skinned")
+                material_idx = 2;
+            if (ImGui::Combo("Material", &material_idx, materials, 3)) {
+                tile.material = materials[material_idx];
+                if (ctx->dirty)
+                    *ctx->dirty = true;
+                if (ctx->window && ctx->base_window_title && ctx->current_dungeon_path && ctx->dirty)
+                    UpdateWindowTitle(ctx->window, *ctx->base_window_title, *ctx->current_dungeon_path, *ctx->dirty);
+            }
+        }
+
         if (ImGui::CollapsingHeader("Rotate Gizmo", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto apply_rotation = [&](raidbuilder::AxisId axis, int dir) {
                 DiceOrientation o = OrientationFromBlock(blk);
@@ -2565,6 +2612,10 @@ int main(int, char**) {
             idx = it->second;
         dungeon_blocks[i].mesh_index = idx;
         dungeon_blocks[i].tex_index = tile_tex_index_for((size_t)idx);
+        dungeon_blocks[i].scale_percent =
+            (idx >= 0 && (size_t)idx < tiles.size() && tiles[(size_t)idx].scale_percent > 0)
+                ? tiles[(size_t)idx].scale_percent
+                : 100;
         if (idx >= 0 && (size_t)idx < tiles.size() && tiles[(size_t)idx].material == "skinned" && dungeon_blocks[i].tex_index < 0) {
             std::fprintf(stderr,
                          "skinned tile '%s' has invalid tex_index=%d (idx=%d, textures=%zu, has_uv=%d)\n",
@@ -3405,6 +3456,7 @@ int main(int, char**) {
                                 new_block.tex_index = active_tex_index;
                                 new_block.key = active_tile_key;
                                 new_block.mesh_index = active_mesh_index;
+                                new_block.scale_percent = std::max(1, tiles[active_tile_index].scale_percent);
                                 dungeon_blocks.push_back(new_block);
                                 add_solid_block(new_block);
                                 selected_flags.assign(dungeon_blocks.size(), 0);
@@ -3457,6 +3509,7 @@ int main(int, char**) {
                             new_block.tex_index = active_tex_index;
                             new_block.key = active_tile_key;
                             new_block.mesh_index = active_mesh_index;
+                            new_block.scale_percent = std::max(1, tiles[active_tile_index].scale_percent);
                             dungeon_blocks.push_back(new_block);
                             add_solid_block(new_block);
                             selected_flags.assign(dungeon_blocks.size(), 0);
@@ -3506,6 +3559,7 @@ int main(int, char**) {
                     new_block.tex_index = active_tex_index;
                     new_block.key = active_tile_key;
                     new_block.mesh_index = active_mesh_index;
+                    new_block.scale_percent = std::max(1, tiles[active_tile_index].scale_percent);
                     dungeon_blocks.push_back(new_block);
                     add_solid_block(new_block);
                     selected_flags.assign(dungeon_blocks.size(), 0);
@@ -3840,6 +3894,8 @@ int main(int, char**) {
         inspector_context.edit_mode = &edit_mode;
         inspector_context.hover_has_block = &hover_has_block;
         inspector_context.hover_block_index = &hover_block_index;
+        inspector_context.tiles = &tiles;
+        inspector_context.tile_index_by_key = &tile_index_by_key;
         inspector_context.main_scale = &main_scale;
         inspector_context.saved_state = &saved_state;
         ui_document.setPropertyPanelCallback(&RenderInspectorPanel, &inspector_context);
