@@ -1389,6 +1389,7 @@ static bool ParseDungeon(const std::string& text,
         sml::SmlSaxParser parser(text);
         parser.registerEnumValue("material", "texture");
         parser.registerEnumValue("material", "vertex");
+        parser.registerEnumValue("material", "skinned");
         parser.registerEnumValue("placement", "ground");
         parser.registerEnumValue("placement", "wall");
         parser.registerEnumValue("placement", "ceiling");
@@ -2531,6 +2532,7 @@ int main(int, char**) {
             fprintf(stderr, "Failed to populate tile resources\n");
         }
         merged_catalog.tiles = merged_tiles;
+        tiles = merged_catalog.tiles;
     }
 
     std::vector<voxel::VoxelRenderer::MeshData> tile_meshes = merged_catalog.meshes;
@@ -2544,7 +2546,9 @@ int main(int, char**) {
             return -2;
         if (index >= tile_mesh_has_uv.size())
             return -2;
-        if (tiles[index].texture.empty() || !tile_mesh_has_uv[index])
+        if (!tile_mesh_has_uv[index])
+            return -2;
+        if (index >= block_texture_paths.size())
             return -2;
         return (int)index;
     };
@@ -2561,6 +2565,15 @@ int main(int, char**) {
             idx = it->second;
         dungeon_blocks[i].mesh_index = idx;
         dungeon_blocks[i].tex_index = tile_tex_index_for((size_t)idx);
+        if (idx >= 0 && (size_t)idx < tiles.size() && tiles[(size_t)idx].material == "skinned" && dungeon_blocks[i].tex_index < 0) {
+            std::fprintf(stderr,
+                         "skinned tile '%s' has invalid tex_index=%d (idx=%d, textures=%zu, has_uv=%d)\n",
+                         dungeon_blocks[i].key.c_str(),
+                         dungeon_blocks[i].tex_index,
+                         idx,
+                         block_texture_paths.size(),
+                         (idx >= 0 && (size_t)idx < tile_mesh_has_uv.size() && tile_mesh_has_uv[(size_t)idx]) ? 1 : 0);
+        }
     }
 
     std::map<std::string, std::vector<int> > tiles_by_category;

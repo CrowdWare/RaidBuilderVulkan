@@ -4,6 +4,7 @@ layout(location = 0) in vec3 v_color;
 layout(location = 1) in vec3 v_normal;
 layout(location = 2) in vec2 v_uv;
 layout(location = 3) flat in float v_tex_index;
+layout(location = 4) flat in uint v_is_skinned;
 layout(location = 0) out vec4 out_color;
 
 layout(set = 0, binding = 0) uniform sampler2D u_ground;
@@ -23,15 +24,17 @@ void main() {
     } else {
         // Make UVs consistent across faces using the face normal.
         vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
-        vec3 an = abs(n);
-        if (an.x > an.y && an.x > an.z) {
-            // +/-X face
-            if (n.x > 0.0)
-                uv.x = 1.0 - uv.x;
-        } else if (an.z > an.x && an.z > an.y) {
-            // +/-Z face
-            if (n.z < 0.0)
-                uv.x = 1.0 - uv.x;
+        if (v_is_skinned == 0u) {
+            vec3 an = abs(n);
+            if (an.x > an.y && an.x > an.z) {
+                // +/-X face
+                if (n.x > 0.0)
+                    uv.x = 1.0 - uv.x;
+            } else if (an.z > an.x && an.z > an.y) {
+                // +/-Z face
+                if (n.z < 0.0)
+                    uv.x = 1.0 - uv.x;
+            }
         }
         int idx = int(v_tex_index + 0.5);
         idx = clamp(idx, 0, 7);
