@@ -8,7 +8,7 @@ layout(location = 4) flat in uint v_is_skinned;
 layout(location = 0) out vec4 out_color;
 
 layout(set = 0, binding = 0) uniform sampler2D u_ground;
-layout(set = 0, binding = 1) uniform sampler2D u_blocks[8];
+layout(set = 0, binding = 1) uniform sampler2D u_blocks[16];
 
 void main() {
     vec3 n = normalize(v_normal);
@@ -22,9 +22,10 @@ void main() {
     } else if (v_tex_index < -0.5) {
         base *= texture(u_ground, v_uv).rgb;
     } else {
-        // Make UVs consistent across faces using the face normal.
-        vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+        vec2 uv = v_uv;
         if (v_is_skinned == 0u) {
+            // Block meshes: flip V and align orientation per face normal.
+            uv = vec2(v_uv.x, 1.0 - v_uv.y);
             vec3 an = abs(n);
             if (an.x > an.y && an.x > an.z) {
                 // +/-X face
@@ -37,7 +38,7 @@ void main() {
             }
         }
         int idx = int(v_tex_index + 0.5);
-        idx = clamp(idx, 0, 7);
+        idx = clamp(idx, 0, 15);
         base *= texture(u_blocks[idx], uv).rgb;
     }
     vec3 lit = base * (ambient + sunlight);

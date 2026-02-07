@@ -26,7 +26,7 @@ layout(std430, set = 0, binding = 2) readonly buffer SkinPalette {
 void main() {
     vec4 skinned_pos = vec4(in_pos, 1.0);
     vec3 skinned_normal = in_normal;
-    if (push.skin.z != 0u) {
+    if (push.skin.y != 0u) {
         mat4 m = mat4(0.0);
         m += skin_palette.mats[push.skin.x + in_joints.x] * in_weights.x;
         m += skin_palette.mats[push.skin.x + in_joints.y] * in_weights.y;

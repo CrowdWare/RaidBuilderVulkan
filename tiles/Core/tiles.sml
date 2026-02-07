@@ -53,11 +53,22 @@ Tile {
     collision: false
 }
 
-Tile {
+/*Tile {
     key: "E"
     name: "Enemy"
     icon: "res://assets/textures/raid_enemy.png"
     model: "Assets/characters/paladin.gltf#Paladin_J_Nordstrom_Helmet#Paladin_J_Nordstrom"
+    animation: "Assets/animations/idle.glb"
+    material: skinned
+    collision: false
+}
+*/
+
+Tile {
+    key: "E"
+    name: "Enemy"
+    icon: "res://assets/textures/raid_enemy.png"
+    model: "Assets/characters/granny.gltf"
     animation: "Assets/animations/idle.glb"
     material: skinned
     collision: false
